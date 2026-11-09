@@ -154,6 +154,7 @@ class InputBox:
 
         # ---- animated logo (video / image) ----
         self.t0 = time.monotonic()
+        self.image_paths: dict[int, str | None] = {}
         self.big = self.mini = None
         self.logo_error: str | None = None
         self.load_logo()
@@ -359,6 +360,7 @@ class InputBox:
 
     def _on_paste(self, buf, text: str) -> None:
         text = text.replace("\r\n", "\n").replace("\r", "\n")
+        self.image_paths[self._ni] = clip.save_image(data)
         paths = clip.parse_image_paths(text)
         if paths:
             for p in paths:
@@ -388,10 +390,11 @@ class InputBox:
         used_i = [int(n) for n in PH_IMG.findall(raw) if int(n) in self.images]
         sub = Submission(
             raw=raw,
-            text=PH_TEXT.sub(lambda m: self.pastes.get(int(m.group(1)), m.group(0)), raw).strip(),
+            text=clip.with_paths(PH_TEXT.sub(lambda m: self.pastes.get(int(m.group(1)), m.group(0)), raw),
+                                 self.image_paths, PH_IMG).strip(),
             images=[self.images[n] for n in used_i],
             pastes=[(n, self.pastes[n]) for n in used_p],
             image_meta=[(n, *self.image_meta[n]) for n in used_i],
         )
-        self.pastes.clear(); self.images.clear(); self.image_meta.clear(); self._nt = self._ni = 0
+        self.pastes.clear(); self.images.clear(); self.image_meta.clear(); self.image_paths.clear(); self._nt = self._ni = 0
         return sub

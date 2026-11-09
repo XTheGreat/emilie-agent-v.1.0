@@ -47,6 +47,12 @@ def grab_clipboard_image() -> bytes | None:
         try:
             from PIL import ImageGrab
             img = ImageGrab.grabclipboard()
+            if isinstance(img, list):             # files copied in Explorer -> take the first image file
+                for f in img:
+                    p = Path(str(f))
+                    if p.suffix.lower() in EXTS and p.is_file():
+                        return p.read_bytes()
+                return None
             if isinstance(img, Image.Image):
                 buf = io.BytesIO()
                 img.save(buf, "PNG")
@@ -82,6 +88,28 @@ def parse_image_paths(text: str) -> list[Path]:
         else:
             return []
     return out
+
+
+def save_image(data: bytes) -> str | None:
+    """Keep a copy of an attached image in ~/.emilie/images so the agent (and tools such as a browser upload)
+    can refer to it by a real file path. Returns the absolute path, or None if it could not be saved."""
+    import time
+    from . import paths
+    try:
+        paths.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+        img = Image.open(io.BytesIO(data))
+        ext = ".png" if img.format == "PNG" or img.mode in ("RGBA", "LA", "P") else ".jpg"
+        p = paths.IMAGES_DIR / f"img-{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns() % 1000000:06d}{ext}"
+        p.write_bytes(data)
+        return str(p)
+    except Exception:
+        return None
+
+
+def with_paths(text: str, saved: dict, pattern) -> str:
+    """[Image #n] -> [Image #n: <path>] in the text sent to the model."""
+    return pattern.sub(lambda m: f"[Image #{m.group(1)}: {saved[int(m.group(1))]}]"
+                       if saved.get(int(m.group(1))) else m.group(0), text)
 
 
 def encode_image(data: bytes) -> tuple[str, str]:

@@ -316,6 +316,7 @@ class TUI:
         self.pastes: dict[int, str] = {}
         self.images: dict[int, tuple[str, str]] = {}
         self.image_meta: dict[int, tuple[tuple[int, int], int]] = {}
+        self.image_paths: dict[int, str | None] = {}
         self._nt = self._ni = 0
         self.console = self._make_console()
         self.load_logo()
@@ -707,7 +708,7 @@ class TUI:
             ]
             keys = [
                 [(ROSE, "shift+tab"), (MUTED, " mode   "), (ROSE, "@file"), (MUTED, " attach   "), (ROSE, "!cmd"), (MUTED, " shell")],
-                [(ROSE, "ctrl+v"), (MUTED, " image   "), (ROSE, "/model"), (MUTED, " model   "), (ROSE, "/skills"), (MUTED, " skills")],
+                [(ROSE, "ctrl+v/alt+p"), (MUTED, " image   "), (ROSE, "/model"), (MUTED, " model   "), (ROSE, "/skills"), (MUTED, " skills")],
                 [(ROSE, "alt +/-"), (MUTED, " size  "), (ROSE, "f"), (MUTED, " fps  "), (ROSE, "i"), (MUTED, " still  "), (ROSE, "b"), (MUTED, " glow  "), (ROSE, "c"), (MUTED, " camera  "), (ROSE, "v"), (MUTED, " call")],
                 [(ROSE, "ctrl+c"), (MUTED, " stop   "), (ROSE, "pgup/pgdn"), (MUTED, " scroll   "), (ROSE, "/help"), (MUTED, " all")],
             ]
@@ -1167,6 +1168,7 @@ class TUI:
         self._ni += 1
         self.images[self._ni] = enc
         self.image_meta[self._ni] = (size, len(data))
+        self.image_paths[self._ni] = clip.save_image(data)
         buf.insert_text(f"[Image #{self._ni}] ")
 
     def _take_photo(self, buf) -> None:
@@ -1377,6 +1379,11 @@ class TUI:
 
     def _on_paste(self, buf, text: str) -> None:
         text = text.replace("\r\n", "\n").replace("\r", "\n")
+        if not text.strip():                      # empty paste: the clipboard may hold an image instead
+            data = clip.grab_clipboard_image()
+            if data:
+                self._add_image(buf, data)
+            return
         paths = clip.parse_image_paths(text)
         if paths:
             for p in paths:
@@ -1395,11 +1402,12 @@ class TUI:
         used_i = [int(n) for n in PH_IMG.findall(raw) if int(n) in self.images]
         sub = Submission(
             raw=raw,
-            text=PH_TEXT.sub(lambda m: self.pastes.get(int(m.group(1)), m.group(0)), raw).strip(),
+            text=clip.with_paths(PH_TEXT.sub(lambda m: self.pastes.get(int(m.group(1)), m.group(0)), raw),
+                                 self.image_paths, PH_IMG).strip(),
             images=[self.images[n] for n in used_i],
             pastes=[(n, self.pastes[n]) for n in used_p],
             image_meta=[(n, *self.image_meta[n]) for n in used_i])
-        self.pastes.clear(); self.images.clear(); self.image_meta.clear(); self._nt = self._ni = 0
+        self.pastes.clear(); self.images.clear(); self.image_meta.clear(); self.image_paths.clear(); self._nt = self._ni = 0
         if self.cam is not None and raw.strip():
             try:
                 sub.images = list(sub.images) + self._call_attachment()
@@ -1667,10 +1675,13 @@ class TUI:
             pass
 
         @kb.add("c-v", filter=free)
+        @kb.add("escape", "p", filter=free)       # Alt+P: Windows Terminal swallows Ctrl+V when the clipboard holds an image
         def _(event):
             data = clip.grab_clipboard_image()
             if data:
                 self._add_image(event.current_buffer, data)
+            else:
+                self.flash(tr_("no image in the clipboard (screenshot with Win+Shift+S, then Alt+P)"), 4)
 
         @kb.add("enter", filter=free)
         def _(event):
