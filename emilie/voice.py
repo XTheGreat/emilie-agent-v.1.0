@@ -25,6 +25,13 @@ from .i18n import t as tr_
 from . import effort
 
 LANG_NAMES = {"ja": "Japanese", "en": "English", "ms": "Malay", "ko": "Korean", "zh": "Chinese"}
+def _detach() -> dict:
+    """Popen kwargs that detach a child from our console/session (POSIX and Windows)."""
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
+    return {"start_new_session": True}
+
+
 SAY_RE = re.compile(r"<say>(.*?)</say>", re.S | re.I)
 CODE_BLOCK = re.compile(r"```.*?```", re.S)
 STORY_RE = re.compile(
@@ -210,14 +217,14 @@ class Voice:
 
     def start_server(self) -> bool:
         d = Path(_cfg("voice_dir", str(Path.home() / "voicebox"))).expanduser()
-        py = d / "backend" / "venv" / "bin" / "python"
+        py = d / "backend" / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
         if not py.exists():
             return False
         LOG.parent.mkdir(parents=True, exist_ok=True)
         host, port = self.url.split("//")[1].split(":")
         self.server = subprocess.Popen([str(py), "-m", "backend.main", "--host", host, "--port", port],
                                        cwd=str(d), stdout=open(LOG, "ab"), stderr=subprocess.STDOUT,
-                                       start_new_session=True)
+                                       **_detach())
         return True
 
     def ensure_server(self, ep: int) -> bool:
@@ -296,14 +303,18 @@ class Voice:
             if shutil.which(cmd[0]):
                 break
         else:
-            self._note(tr_('voice: no audio player found (install mpv)'))
-            return
+            if os.name == "nt":      # built-in fallback: PowerShell's WAV player
+                cmd = ["powershell", "-NoProfile", "-Command"]
+            else:
+                self._note(tr_('voice: no audio player found (install mpv)'))
+                return
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             f.write(audio)
         try:
             if ep != self.epoch:
                 return
-            self.proc = subprocess.Popen([*cmd, f.name], stdin=subprocess.DEVNULL,
+            tail = [f"(New-Object Media.SoundPlayer '{f.name}').PlaySync()"] if cmd[0] == "powershell" else [f.name]
+            self.proc = subprocess.Popen([*cmd, *tail], stdin=subprocess.DEVNULL,
                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.proc.wait()
         finally:

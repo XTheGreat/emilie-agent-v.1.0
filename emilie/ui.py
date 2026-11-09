@@ -130,41 +130,31 @@ def getkey() -> str:
     """Read one key without Enter. A lone Esc -> 'esc'; arrows/other sequences -> 'seq' (ignored)."""
     if not sys.stdin.isatty():
         return "n"
-    import termios
-    import tty
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        ch = os.read(fd, 1).decode(errors="ignore")
+    from .term import RawInput
+    with RawInput() as ri:
+        ch = ri.read(1).decode(errors="ignore")
         if ch == "\x1b":
-            if not select.select([fd], [], [], 0.05)[0]:
-                return "esc"          # Esc tunggal
-            while select.select([fd], [], [], 0.02)[0]:
-                os.read(fd, 8)
+            if not ri.ready(0.05):
+                return "esc"          # lone Esc
+            while ri.ready(0.02):
+                ri.read(8)
             return "seq"              # arrows/function keys -> ignored
         return ch
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
 def read_key() -> str:
     """One key: 'up','down','pgup','pgdn','enter','esc','ctrl-c', or its character."""
     if not sys.stdin.isatty():
         return "esc"
-    import termios
-    import tty
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        b = os.read(fd, 1)
+    from .term import RawInput
+    with RawInput() as ri:
+        b = ri.read(1)
         if b == b"\x1b":
-            if not select.select([fd], [], [], 0.05)[0]:
+            if not ri.ready(0.05):
                 return "esc"
             seq = b""
-            while select.select([fd], [], [], 0.02)[0]:
-                seq += os.read(fd, 8)
+            while ri.ready(0.02):
+                seq += ri.read(8)
             return {b"[A": "up", b"OA": "up", b"[B": "down", b"OB": "down",
                     b"[5~": "pgup", b"[6~": "pgdn"}.get(seq, "seq")
         if b in (b"\r", b"\n"):
@@ -172,8 +162,6 @@ def read_key() -> str:
         if b == b"\x03":
             return "ctrl-c"
         return b.decode(errors="ignore").lower()
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
 def permission_panel(name: str, args: dict, reason: str) -> tuple[Panel, Text]:

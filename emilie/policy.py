@@ -12,6 +12,10 @@ READONLY_CMDS = {
     "du", "df", "uname", "whoami", "id", "file", "uniq", "diff", "basename", "dirname",
     "realpath", "printenv", "grep", "rg", "true", "false", "test", "[", "cd", "type",
     "hostname", "nproc", "free", "uptime", "ps", "sort",
+    # Windows (cmd / PowerShell), read-only
+    "dir", "get-childitem", "gci", "get-content", "gc", "select-string", "sls", "get-location", "gl",
+    "where", "where.exe", "findstr", "get-date", "get-item", "gi", "test-path", "resolve-path",
+    "get-command", "gcm", "write-output", "write-host", "measure-object", "get-process", "get-ps",
 }
 GIT_RO = {"status", "log", "diff", "show", "branch", "rev-parse", "remote", "ls-files", "blame"}
 VERSIONED = {"python3", "python", "node", "npm", "pip", "pip3", "rustc", "cargo", "go",
@@ -21,6 +25,11 @@ SAFE_ABS = ("/dev/null", "/usr", "/bin", "/lib", "/opt", "/tmp", "/etc/os-releas
 
 DANGEROUS = [
     (r"\bsudo\b", N_('uses sudo')),
+    (r"\b(Remove-Item|rmdir|rd|del|erase|Format-Volume|Stop-Computer|Restart-Computer|reg\s+(add|delete))\b",
+     N_('deletes or changes the system')),
+    (r"\b(winget|choco|scoop)\s+(install|uninstall|upgrade)\b", N_('changes system packages')),
+    (r"\b(iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^|;&]*\|\s*(iex|Invoke-Expression)\b",
+     N_('downloads and runs a script')),
     (r"\bgit\s+push\b", N_('git push')),
     (r"\bgit\s+reset\s+--hard", N_('git reset --hard')),
     (r"\bgit\s+clean\b", N_('git clean')),

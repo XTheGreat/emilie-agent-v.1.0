@@ -21,6 +21,7 @@ from .theme import ERR, MUTED, ROSE, WARN
 
 BASE_SYSTEM = """You are Emilie, a coding companion in the terminal. Friendly, careful and concise.
 Working directory: {cwd}
+{platform}
 Working rules:
 - Use read_file / grep / glob to read, not bash cat/ls/find, unless really needed.
 - Do only what was asked. Do not run extra exploratory commands that are not needed.
@@ -193,7 +194,7 @@ class Agent:
         tools.LIMITS["read_lines"] = effort.read_lines
 
     def system_prompt(self) -> str:
-        s = BASE_SYSTEM.format(cwd=os.getcwd()) + "\n\nAnswer style: " + self.effort.style
+        s = BASE_SYSTEM.format(cwd=os.getcwd(), platform=tools.PLATFORM_NOTE) + "\n\nAnswer style: " + self.effort.style
         ps = persona.section()
         if ps:
             s += "\n\n" + ps
@@ -524,7 +525,7 @@ class Agent:
         return True
 
     def _companion_system(self) -> str:
-        system = BASE_SYSTEM.format(cwd=os.getcwd())
+        system = BASE_SYSTEM.format(cwd=os.getcwd(), platform=tools.PLATFORM_NOTE)
         for extra in (persona.section(), language.prompt_section(), COMPANION_SYSTEM, companion.context(self._state())):
             if extra:
                 system += "\n\n" + extra

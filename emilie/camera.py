@@ -25,8 +25,48 @@ def available() -> bool:
     return bool(shutil.which("ffmpeg")) and bool(devices())
 
 
+IS_WIN = os.name == "nt"
+
+
+def _dshow_devices(kind: str) -> list[str]:
+    """Windows: DirectShow device names from ffmpeg (kind = 'video' or 'audio')."""
+    import re
+    try:
+        r = subprocess.run(["ffmpeg", "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
+                           capture_output=True, timeout=10, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    text = r.stderr.decode("utf-8", "replace")
+    names = re.findall(r'"([^"]+)"\s+\(' + kind + r'\)', text)
+    if names:
+        return names
+    # older ffmpeg: a section header per kind, then one quoted name per line
+    out, on = [], False
+    for line in text.splitlines():
+        if "DirectShow " + kind + " devices" in line:
+            on = True
+        elif "DirectShow " in line and "devices" in line:
+            on = False
+        elif on and "Alternative name" not in line:
+            m = re.search(r'"([^"]+)"', line)
+            if m:
+                out.append(m.group(1))
+    return out
+
+
 def devices() -> list[str]:
+    if IS_WIN:
+        return _dshow_devices("video") if shutil.which("ffmpeg") else []
     return sorted(glob.glob("/dev/video*"), key=lambda p: int("".join(c for c in p if c.isdigit()) or 0))
+
+
+def _exists(dev: str) -> bool:
+    return True if IS_WIN else os.path.exists(dev)
+
+
+def _dev_args(dev: str) -> list[str]:
+    """ffmpeg input device arguments for this platform."""
+    return ["-f", "dshow", "-i", f"video={dev}"] if IS_WIN else ["-f", "v4l2", "-i", dev]
 
 
 def configured() -> str | None:
@@ -39,7 +79,7 @@ def set_device(path: str | None) -> None:
 
 
 def _shoot(dev: str) -> bytes | None:
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "v4l2", "-i", dev,
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", *_dev_args(dev),
            "-vf", f"select=gte(n\\,{WARMUP_FRAMES - 1})", "-frames:v", "1", "-f", "mjpeg", "-"]
     try:
         r = subprocess.run(cmd, capture_output=True, timeout=TIMEOUT, stdin=subprocess.DEVNULL)
@@ -54,11 +94,11 @@ def grab() -> tuple[bytes | None, str]:
         return None, "ffmpeg is not installed"
     devs = devices()
     if not devs:
-        return None, "no camera found (/dev/video*)"
+        return None, "no camera found"
     first = configured()
     order = ([first] if first else []) + [d for d in devs if d != first]
     for d in order:
-        if not os.path.exists(d):
+        if not _exists(d):
             continue
         data = _shoot(d)
         if data:
@@ -95,6 +135,8 @@ def _input_args(dev: str | None) -> list[str]:
     src = paths_env("CAMERA_SOURCE")
     if src and src.startswith("lavfi:"):
         return ["-re", "-f", "lavfi", "-i", src[6:]]
+    if IS_WIN:
+        return ["-f", "dshow", "-framerate", str(STREAM_FPS), "-video_size", "640x480", "-i", f"video={dev or ''}"]
     return ["-f", "v4l2", "-framerate", str(STREAM_FPS), "-video_size", "640x480", "-i", dev or ""]
 
 
@@ -135,9 +177,9 @@ class Stream:
         if not (src and src.startswith("lavfi:")):
             devs = devices()
             if not devs:
-                return "no camera found (/dev/video*)"
+                return "no camera found"
             first = configured()
-            dev = first if first and os.path.exists(first) else devs[0]
+            dev = first if first and _exists(first) else devs[0]
         self.device = dev or "test source"
         vf = f"scale={self.w}:{self.h}:force_original_aspect_ratio=increase,crop={self.w}:{self.h}"
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", *_input_args(dev), "-vf", vf,
@@ -333,7 +375,7 @@ class Stream:
 
 def viewer_available() -> bool:
     """A separate window needs a graphical session and mpv or Tk."""
-    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+    if not IS_WIN and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         return False
     return bool(shutil.which("mpv")) or importlib.util.find_spec("tkinter") is not None
 

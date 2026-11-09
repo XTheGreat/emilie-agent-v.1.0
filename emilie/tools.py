@@ -1,6 +1,7 @@
 """Tool definitions (schema) and implementation."""
 import os
 import re
+import shutil
 import signal
 import subprocess
 import urllib.error
@@ -89,12 +90,30 @@ def glob(pattern: str, path: str = ".") -> str:
 
 
 # ------------------------------------------------------------------ shell
+IS_WIN = os.name == "nt"
+PLATFORM_NOTE = ("OS: Windows. The bash tool runs commands in PowerShell (use PowerShell/Windows syntax and backslash or "
+                 "forward-slash paths, not Linux-only tools)." if IS_WIN else "")
+
+
+def _shell_cmd(command: str) -> list[str]:
+    """Windows: PowerShell (pwsh if present), UTF-8 output."""
+    exe = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
+    prefix = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $ProgressPreference='SilentlyContinue'; "
+    return [exe, "-NoProfile", "-NonInteractive", "-Command", prefix + command]
+
+
 def _kill_group(proc: subprocess.Popen) -> None:
-    """Kill the WHOLE process group (shell + its children), not just the shell."""
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        proc.kill()
+    """Kill the WHOLE process tree (shell + its children), not just the shell."""
+    if IS_WIN:
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=10)
+        except Exception:
+            proc.kill()
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
     try:
         proc.wait(timeout=2)
     except subprocess.TimeoutExpired:
@@ -103,8 +122,13 @@ def _kill_group(proc: subprocess.Popen) -> None:
 
 def bash(command: str) -> str:
     """Run a command; short polling so an interrupt (Ctrl+C) can get in and child processes are stopped too."""
-    proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, start_new_session=True)
+    if IS_WIN:
+        proc = subprocess.Popen(_shell_cmd(command), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+                                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
+    else:
+        proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, start_new_session=True)
     waited = 0.0
     try:
         while True:

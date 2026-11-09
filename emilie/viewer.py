@@ -6,11 +6,9 @@ Home/End; q / Esc goes back.
 """
 import os
 import re
-import select
 import shutil
 import sys
-import termios
-import tty
+from .term import RawInput
 
 MOUSE = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
 CSI = re.compile(rb"\x1b\[[0-9;?<]*[A-Za-z~]")
@@ -33,12 +31,11 @@ def view(text: str, title: str = "history") -> None:
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return
     lines = clean(text).rstrip("\n").split("\n")
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
+    ri = RawInput(cbreak=True)
+    ri.__enter__()
     top: int | None = None
     last_size, dirty, buf = None, True, b""
     try:
-        tty.setcbreak(fd)
         _w("\x1b[?1000h\x1b[?1006h\x1b[?25l\x1b[?7l\x1b[2J")   # mouse, hide the cursor, no auto-wrap
         while True:
             cols, rows = shutil.get_terminal_size()
@@ -55,9 +52,9 @@ def view(text: str, title: str = "history") -> None:
                 out.append(f"\x1b[{rows};1H\x1b[7m {title} · {pos} · mouse wheel / ↑↓ / PgUp PgDn · \x1b[1mq / Esc / Enter = back to the input\x1b[22m \x1b[K\x1b[0m")
                 _w("".join(out))
                 last_size, dirty = (cols, rows), False
-            if not select.select([fd], [], [], 0.3)[0]:
+            if not ri.ready(0.3):
                 continue
-            buf += os.read(fd, 256)
+            buf += ri.read(256)
             while buf:
                 m = MOUSE.match(buf)
                 if m:
@@ -117,8 +114,8 @@ def view(text: str, title: str = "history") -> None:
                     dirty = False
     finally:
         _w("\x1b[?7h\x1b[?25h\x1b[?1006l\x1b[?1000l\x1b[0m\x1b[2J\x1b[H")
-        termios.tcflush(fd, termios.TCIFLUSH)       # buang sisa event mouse
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        ri.flush()                                  # drop leftover mouse events
+        ri.__exit__(None, None, None)
 
 
 def tail(text: str, rows_reserved: int = 14) -> str:

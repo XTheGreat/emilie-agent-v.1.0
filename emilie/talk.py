@@ -12,6 +12,7 @@ talk_cmd (override the capture command, used by tests).
 """
 import collections
 import io
+import os
 import json
 import shlex
 import shutil
@@ -41,6 +42,12 @@ def capture_cmd() -> list[str] | None:
     custom = _cfg("talk_cmd", "")
     if custom:
         return shlex.split(custom) if isinstance(custom, str) else list(custom)
+    if os.name == "nt" and shutil.which("ffmpeg"):
+        from .camera import _dshow_devices
+        mics = _dshow_devices("audio")
+        if mics:
+            return ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "dshow", "-i", f"audio={mics[0]}",
+                    "-ac", "1", "-ar", "16000", "-f", "s16le", "-"]
     if shutil.which("parec"):
         return ["parec", "--format=s16le", "--rate=16000", "--channels=1", "--raw", "--latency-msec=30"]
     if shutil.which("arecord"):

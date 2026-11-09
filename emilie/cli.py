@@ -255,7 +255,7 @@ def make_core(console: Console, argv: list[str], hooks) -> Core:
 
     def short_cwd(n: int = 28) -> str:
         """Long ~/a/b/c -> …/b/c so the footer is not pushed off the screen."""
-        d = os.getcwd().replace(os.path.expanduser("~"), "~", 1)
+        d = os.getcwd().replace(os.path.expanduser("~"), "~", 1).replace("\\", "/")
         if len(d) <= n:
             return d
         parts = d.split("/")
@@ -756,6 +756,14 @@ def main_classic(argv: list[str]) -> None:
 # ======================================================================= entri
 def main() -> None:
     argv = sys.argv[1:]
+    if os.name == "nt":
+        if not sys.flags.utf8_mode:      # Windows defaults to cp1252 for files and pipes: run again in UTF-8 mode
+            try:
+                sys.exit(subprocess.call([sys.executable, "-X", "utf8", "-m", "emilie.cli", *argv]))
+            except KeyboardInterrupt:
+                sys.exit(130)
+        from .term import enable_vt_output
+        enable_vt_output()
     if "--untrust" in argv:                      # forget the "trust this folder" answer for the current folder
         print(tr_("folder no longer trusted: {0}", os.getcwd()) if trust.remove()
               else tr_("this folder was not in the trusted list: {0}", os.getcwd()))
@@ -771,6 +779,8 @@ def main() -> None:
             print(tr_("Welcome to Emilie Agent! No API key yet, let's set one up (once)."))
             if not providers.setup():
                 return
+            if os.name == "nt":
+                sys.exit(subprocess.call([sys.executable, "-m", "emilie.cli", *argv]))
             os.execv(sys.executable, [sys.executable, "-m", "emilie.cli", *argv])
         print(tr_('No API key. Run: emilie --setup'), file=sys.stderr)
         sys.exit(1)

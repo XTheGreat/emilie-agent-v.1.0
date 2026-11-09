@@ -10,6 +10,7 @@ import atexit
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -89,9 +90,15 @@ class Server:
     def start(self) -> None:
         try:
             env = {**os.environ, **{k: str(v) for k, v in self.env.items()}}
-            self.proc = subprocess.Popen([self.command, *map(str, self.args)], stdin=subprocess.PIPE,
-                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
-                                         start_new_session=True)
+            cmd = [self.command, *map(str, self.args)]
+            if os.name == "nt":
+                # npx / npm / uvx are .cmd shims on Windows: resolve them (Popen without a shell does not find them)
+                cmd[0] = shutil.which(self.command, path=env.get("PATH")) or self.command
+                extra = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
+            else:
+                extra = {"start_new_session": True}
+            self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=subprocess.DEVNULL, env=env, **extra)
             threading.Thread(target=self._reader, daemon=True).start()
             self.request("initialize", {"protocolVersion": PROTOCOL, "capabilities": {},
                                         "clientInfo": {"name": "emilie", "version": "0.1.0"}}, timeout=20)
@@ -138,6 +145,12 @@ class Server:
             tools.unregister(n)
         self.tool_names.clear()
         if self.proc and self.proc.poll() is None:
+            if os.name == "nt":      # kill the whole tree (npx starts node as a child)
+                try:
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(self.proc.pid)], capture_output=True, timeout=10)
+                except Exception:
+                    self.proc.kill()
+                return
             try:
                 os.killpg(self.proc.pid, 9)
             except (ProcessLookupError, PermissionError):
