@@ -4,7 +4,8 @@ import shlex
 from pathlib import Path
 from .i18n import t as tr_, N_
 
-READONLY_TOOLS = {"read_file", "grep", "glob", "todo_write", "use_skill"}
+READONLY_TOOLS = {"read_file", "grep", "glob", "todo_write", "use_skill", "web_search", "task",   # task = read-only sub-agent
+                  "bg_output", "bg_stop"}                  # only touch background tasks Emilie itself started
 MODES = ("ask", "trust", "plan")
 
 READONLY_CMDS = {
@@ -194,12 +195,42 @@ class Policy:
         return None
 
     # --- decision ---
+    # --- persistent rules: ~/.emilie/settings.json -> {"permissions": {"allow": [...], "deny": [...]}} ---
+    # Rule = "tool" or "tool(arg pattern)"; patterns are case-insensitive globs: "mcp__browser__*", "bash(git *)",
+    # "web_fetch(*github.com*)". For bash the arg is the command, for files the path, for web_fetch the url.
+    @staticmethod
+    def _rules(kind: str) -> list[str]:
+        from . import effort
+        perms = effort.load_settings().get("permissions")
+        rules = perms.get(kind) if isinstance(perms, dict) else None
+        return [r for r in rules if isinstance(r, str)] if isinstance(rules, list) else []
+
+    @staticmethod
+    def _rule_match(rule: str, name: str, args: dict) -> bool:
+        import fnmatch
+        m = re.fullmatch(r"\s*([^()\s]+)\s*(?:\((.*)\))?\s*", rule, re.S)
+        if not m:
+            return False
+        tool, pat = m.group(1).lower(), m.group(2)
+        if not fnmatch.fnmatchcase(name.lower(), tool):
+            return False
+        if pat is None:
+            return True
+        arg = args.get("command") or args.get("path") or args.get("url") or ""
+        return fnmatch.fnmatchcase(str(arg).lower(), pat.strip().lower())
+
     def check(self, name: str, args: dict) -> tuple[str, str]:
         """return ("allow"|"ask"|"deny", alasan)"""
         plan = self.mode == "plan"
         if name in READONLY_TOOLS:
             return "allow", ""
-        if name == "bash":
+        for r in self._rules("deny"):
+            if self._rule_match(r, name, args):
+                return "deny", tr_('blocked by your rule: {r}', r=r)
+        if not plan and any(self._rule_match(r, name, args) for r in self._rules("allow")):
+            if name not in ("bash", "bash_bg") or not self.danger_reason(args.get("command", "")):   # a dangerous command still asks
+                return "allow", ""
+        if name in ("bash", "bash_bg"):
             cmd = args.get("command", "")
             why = self.danger_reason(cmd)
             ro = is_readonly_cmd(cmd)

@@ -11,7 +11,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from .i18n import t as tr_
-from . import context, session, skills, tools, ui
+from . import claude, context, hooks, session, skills, tools, ui
 from . import companion, language, persona, voice
 from .config import API_KEY, BASE_URL, MODEL, PROVIDER, VISION_MODEL
 from .effort import Effort, load_settings
@@ -27,7 +27,14 @@ Working rules:
 - Do only what was asked. Do not run extra exploratory commands that are not needed.
 - Read a file before editing it. Briefly explain what you are doing.
 - For work with 3+ steps, write the plan with todo_write and keep its status updated.
-- If a message contains [Image #n], that is an image the user attached. A <file> block is a file the user @-mentioned."""
+- If a message contains [Image #n], that is an image the user attached. When it is written as [Image #n: <path>], that
+  path is a real file on disk (kept in ~/.emilie/images): use it whenever a tool needs a file, e.g. to upload or send the
+  image in a browser or chat app. Recent images can also be listed with glob in that folder.
+- For anything current or unknown (news, docs, prices, versions), use web_search first, then web_fetch on the best URL.
+  Prefer these over driving a browser when you only need to read information.
+- For wide searches ("where is X handled", "survey this codebase", multi-page web research) delegate to the task tool:
+  a read-only sub-agent investigates in its own context and returns a short report. Do small lookups yourself.
+- A <file> block is a file the user @-mentioned."""
 
 COMPACT_SYSTEM = ("You summarize a coding conversation so it can continue without losing context. "
                   "Write a dense summary (at most ~350 words): the user's goal, key decisions, "
@@ -155,6 +162,13 @@ class Usage:
         self.exact = self.exact and exact
 
 
+class Ckpt(dict):
+    """Files as they were before one turn ({path: bytes | None}), plus where that turn started in the conversation."""
+    def __init__(self, label: str = "", mark: int | None = None):
+        super().__init__()
+        self.label, self.mark, self.at = " ".join((label or "").split())[:70], mark, time.time()
+
+
 class Agent:
     def __init__(self, console: Console, policy: Policy, effort: Effort):
         self.console = console
@@ -186,6 +200,85 @@ class Agent:
         else:
             import anthropic
             self.client = anthropic.Anthropic(api_key=API_KEY)
+        tools.register("task", self.run_subagent, tools.schema(
+            "task", "Delegate a research job to a sub-agent with its own clean context. It can only READ (read_file, "
+                    "grep, glob, web_search, web_fetch) and returns one written report. Use it for wide searches, "
+                    "'where/how is X done in this codebase', or web research, so the details do not fill your context. "
+                    "Give it a complete, self-contained brief: it cannot see this conversation.",
+            {"description": {"type": "string", "description": "3-5 word label"},
+             "prompt": {"type": "string", "description": "the full brief: what to find and what to report back"}},
+            ["description", "prompt"]), "agent")
+
+    # ------------------------------------------------------------ subagent
+    SUB_TOOLS = ("read_file", "grep", "glob", "web_search", "web_fetch")
+    SUB_ROUNDS = 12
+    SUB_SYSTEM = ("You are a research sub-agent working for another agent. Working directory: {cwd}\n{platform}\n"
+                  "You can only read: read_file, grep, glob, web_search, web_fetch. You cannot change anything.\n"
+                  "Investigate the brief efficiently (few, targeted calls), then reply with ONE final report: the answer "
+                  "first, then the evidence (file paths with line numbers, or URLs). Be concise; no preamble.")
+
+    def run_subagent(self, description: str, prompt: str) -> str:
+        """Run a read-only sub-agent in a fresh context and return its final report as the tool result."""
+        if not (prompt or "").strip():
+            return "ERROR: empty prompt"
+        schemas = [tools.TOOLS[n][1] for n in self.SUB_TOOLS if n in tools.TOOLS]
+        system = self.SUB_SYSTEM.format(cwd=os.getcwd(), platform=tools.PLATFORM_NOTE)
+        self.console.print(tr_('[{MUTED}]sub-agent: {0}[/]', description or prompt[:40], MUTED=MUTED))
+
+        def run_tool(name: str, args: dict) -> str:
+            if name not in self.SUB_TOOLS or name not in tools.TOOLS:
+                return f"ERROR: tool '{name}' is not available to a sub-agent"
+            ui.tool_header(self.console, name, args)
+            try:
+                return tools.TOOLS[name][0](**args)
+            except Exception as e:
+                return f"ERROR: {e}"
+
+        last_text = ""
+        try:
+            if PROVIDER == "openai":
+                oa = [{"type": "function", "function": {"name": s["name"], "description": s["description"],
+                                                         "parameters": s["input_schema"]}} for s in schemas]
+                msgs = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
+                for _ in range(self.SUB_ROUNDS):
+                    r = self.client.chat.completions.create(model=self.active_model, tools=oa, messages=msgs,
+                                                            max_tokens=self.effort.max_output)
+                    if r.usage:
+                        self.usage.add(r.usage.prompt_tokens or 0, r.usage.completion_tokens or 0, True)
+                    m = r.choices[0].message
+                    last_text = m.content or last_text
+                    if not m.tool_calls:
+                        return last_text or "(the sub-agent returned nothing)"
+                    msgs.append({"role": "assistant", "content": m.content, "tool_calls": [
+                        {"id": c.id, "type": "function",
+                         "function": {"name": c.function.name, "arguments": c.function.arguments or "{}"}}
+                        for c in m.tool_calls]})
+                    for c in m.tool_calls:
+                        try:
+                            out = run_tool(c.function.name, json.loads(c.function.arguments or "{}"))
+                        except json.JSONDecodeError:
+                            out = "ERROR: tool arguments are not valid JSON"
+                        msgs.append({"role": "tool", "tool_call_id": c.id, "content": out})
+            else:
+                msgs = [{"role": "user", "content": prompt}]
+                for _ in range(self.SUB_ROUNDS):
+                    r = self.client.messages.create(model=self.active_model, max_tokens=self.effort.max_output,
+                                                    system=system, tools=schemas, messages=msgs)
+                    self.usage.add(r.usage.input_tokens, r.usage.output_tokens, True)
+                    text = "".join(b.text for b in r.content if b.type == "text")
+                    last_text = text or last_text
+                    calls = [b for b in r.content if b.type == "tool_use"]
+                    if not calls:
+                        return last_text or "(the sub-agent returned nothing)"
+                    msgs.append({"role": "assistant", "content": [b.model_dump(exclude_none=True) for b in r.content]})
+                    msgs.append({"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": c.id, "content": run_tool(c.name, c.input)}
+                        for c in calls]})
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            return f"ERROR: sub-agent failed: {e}" + (f"\nPartial report so far:\n{last_text}" if last_text else "")
+        return (last_text + "\n\n" if last_text else "") + "(sub-agent stopped: round limit reached)"
 
     # ------------------------------------------------------------ konfigurasi
     def set_effort(self, effort: Effort) -> None:
@@ -294,10 +387,9 @@ class Agent:
         except OSError:
             pass
 
-    def undo(self) -> list[str] | None:
-        if not self.checkpoints:
-            return None
-        ck, done = self.checkpoints.pop(), []
+    @staticmethod
+    def _restore(ck: dict) -> list[str]:
+        done = []
         for path, data in ck.items():
             p = Path(path)
             if data is None:
@@ -307,6 +399,38 @@ class Agent:
                 p.write_bytes(data)
             done.append(path)
         return done
+
+    def undo(self) -> list[str] | None:
+        if not self.checkpoints:
+            return None
+        return self._restore(self.checkpoints.pop())
+
+    def rewind(self, n: int, files: bool = True, chat: bool = True) -> tuple[list[str], int] | str:
+        """Go back to BEFORE the n-th most recent turn that changed files (n=1 is the latest): restore every file
+        those turns touched and/or cut the conversation back to that point. Returns (restored paths, messages
+        removed) or an error string."""
+        cps = self.checkpoints
+        if not 1 <= n <= len(cps):
+            return "no such checkpoint"
+        target, span = cps[-n], cps[-n:]
+        if chat and (getattr(target, "mark", None) is None or target.mark > len(self.messages)):
+            return "the conversation of that turn can no longer be rewound (history was compacted or already rewound); use 'files'"
+        restored: list[str] = []
+        if files:
+            for ck in reversed(span):                   # newest first, so the OLDEST saved copy ends up on disk
+                restored += [p for p in self._restore(ck) if p not in restored]
+            del cps[-n:]
+        removed = 0
+        if chat:
+            removed = len(self.messages) - target.mark
+            self.messages = self.messages[:target.mark]
+            self.todos = []
+            self._resume_note = ""
+            if not files:
+                for ck in span:                          # the files stay as they are; the chat points are gone
+                    ck.mark = None
+            self.save()
+        return restored, removed
 
     # ------------------------------------------------------------ history summarising
     @staticmethod
@@ -374,6 +498,8 @@ class Agent:
         head = [{"role": "user", "content": f"[Summary of the earlier conversation]\n{summary.strip()}"},
                 {"role": "assistant", "content": "Understood, I will continue from that summary."}]
         self.messages = head + self.messages[idx:]
+        for ck in self.checkpoints:                    # message positions changed: the chat can no longer be rewound
+            ck.mark = None
         after = self.ctx_tokens()
         self.console.print(tr_('[{MUTED}]history compacted{0}: ~{1:.1f}k → ~{2:.1f}k token[/]', ' automatically' if auto else '', before / 1000, after / 1000, MUTED=MUTED))
         self.save()
@@ -403,6 +529,10 @@ class Agent:
                 self.policy.always.add(name)
             if ans == "t":
                 self.policy.mode = "trust"
+        ok, why = hooks.pre(name, args)
+        if not ok:
+            ui.denied(self.console, name, tr_('blocked by a hook: {0}', why))
+            return f"BLOCKED by a hook: {why}. Do not repeat it; continue or ask the user."
         ui.tool_header(self.console, name, args)
         preview = None if asked else ui.make_preview(name, args)
         if name in {"write_file", "edit_file"}:
@@ -424,6 +554,12 @@ class Agent:
         if name == "todo_write" and not out.startswith("ERROR"):
             self.todos = args.get("todos", [])
             ui.print_todos(self.console, self.todos)
+        feedback, warns = hooks.post(name, args, out)
+        for w in warns:
+            self.console.print(f"[{WARN}]{w}[/]", markup=True, highlight=False)
+        if feedback:
+            self.console.print(tr_('[{MUTED}]hook feedback sent to the model[/]', MUTED=MUTED))
+            out += "\n\n[hook feedback]\n" + feedback
         return out
 
     # ------------------------------------------------------------ user message
@@ -692,7 +828,7 @@ class Agent:
     def _run_turn(self, user_text: str, images: list[tuple[str, str]] | None = None) -> None:
         images = images or []
         mark = len(self.messages)
-        self._turn_ckpt = {}
+        self._turn_ckpt = Ckpt(user_text, mark)
         if images:
             if VISION_MODEL and VISION_MODEL != self.model:
                 self.console.print(tr_('[{MUTED}]image attached → using vision model: {VISION_MODEL}[/]', MUTED=MUTED, VISION_MODEL=VISION_MODEL))
@@ -791,18 +927,18 @@ class Agent:
             rounds += 1
             view = StreamView(self.console).start()
             try:
-                with self.client.messages.stream(
-                    model=self.active_model, max_tokens=self.effort.max_output,
-                    system=self.system_prompt(), tools=tools.SCHEMAS, messages=self.messages,
-                ) as stream:
+                kw = claude.request_kwargs(self.system_prompt(), tools.SCHEMAS, self.messages, self.effort.max_output,
+                                           BASE_URL, int(load_settings().get("thinking") or 0))
+                with self.client.messages.stream(model=self.active_model, **kw) as stream:
                     for text in stream.text_stream:
                         view.text(text)
                     resp = stream.get_final_message()
             except BaseException:
                 view.abort()
                 raise
-            view.finish(resp.usage.output_tokens)
-            self.usage.add(resp.usage.input_tokens, resp.usage.output_tokens, True)
+            n_in, n_out = claude.usage_tokens(resp.usage)
+            view.finish(n_out)
+            self.usage.add(n_in, n_out, True)
             self.messages.append({"role": "assistant",
                                   "content": [b.model_dump(exclude_none=True) for b in resp.content]})
             self._after_text("".join(b.text for b in resp.content if b.type == "text"),

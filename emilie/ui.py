@@ -13,8 +13,8 @@ from rich.text import Text
 from .i18n import t as tr_, N_
 from .theme import ADD, DEL, ERR, LAV, MUTED, OK, ROSE, WARN
 
-LABELS = {"bash": "Bash", "write_file": "Write", "edit_file": "Update",
-          "read_file": "Read", "grep": "Search", "glob": "Glob", "web_fetch": "Fetch",
+LABELS = {"bash": "Bash", "bash_bg": "Bash(bg)", "bg_output": "BgOutput", "bg_stop": "BgStop", "write_file": "Write", "edit_file": "Update",
+          "read_file": "Read", "grep": "Search", "glob": "Glob", "web_fetch": "Fetch", "web_search": "WebSearch", "task": "Task",
           "todo_write": "Todos", "use_skill": "Skill"}
 
 
@@ -31,12 +31,18 @@ def _one_line(s: str, n: int = 100) -> str:
 
 
 def _target(name: str, args: dict) -> str:
-    if name == "bash":
+    if name in ("bash", "bash_bg"):
         return args.get("command", "")
+    if name in ("bg_output", "bg_stop"):
+        return f"task {args.get('id') or 'all'}"
     if name in {"grep", "glob"}:
         return f"{args.get('pattern', '')}  {args.get('path', '')}".strip()
     if name == "web_fetch":
         return args.get("url", "")
+    if name == "web_search":
+        return args.get("query", "")
+    if name == "task":
+        return args.get("description", "")
     if name == "todo_write":
         return f"{len(args.get('todos', []))} item"
     if "path" in args:
@@ -63,6 +69,8 @@ def tool_result(console: Console, name: str, out: str, dt: float | None = None) 
         summary = ["no files" if lines == ["no matches"] else f"{len(lines)} file"]
     elif name == "web_fetch" and not err:
         summary = [tr_('Fetched {0} characters', len(out))]
+    elif name == "web_search" and not err:
+        summary = [tr_('{0} results', sum(1 for l in lines if re.match(r"\d+\. ", l)))]
     elif name == "todo_write":
         summary = lines[:1]
     elif name in {"write_file", "edit_file"}:
@@ -89,11 +97,12 @@ def make_preview(name: str, args: dict) -> Text | None:
     """Coloured diff for edit/write."""
     try:
         if name == "edit_file":
-            p = Path(args["path"]).expanduser()
-            old = p.read_text()
-            if old.count(args["old_string"]) != 1:
+            from . import tools as _tools
+            old, new, _eol, err = _tools.compute_edit(
+                args["path"], args.get("old_string", ""), args.get("new_string", ""),
+                bool(args.get("replace_all")), args.get("edits"))
+            if err:
                 return None
-            new = old.replace(args["old_string"], args["new_string"], 1)
         elif name == "write_file":
             p = Path(args["path"]).expanduser()
             old = p.read_text() if p.exists() else ""

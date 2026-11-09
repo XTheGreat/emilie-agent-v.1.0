@@ -39,23 +39,66 @@ def read_file(path: str, offset: int = 1, limit: int = 0) -> str:
     return body
 
 
+def _read_text(p: Path) -> tuple[str, str]:
+    """(text with \\n newlines, the file's own newline). Reading with newline='' keeps CRLF files CRLF on Windows."""
+    with open(p, encoding="utf-8", errors="replace", newline="") as f:
+        raw = f.read()
+    eol = "\r\n" if "\r\n" in raw else "\n"
+    return (raw.replace("\r\n", "\n") if eol == "\r\n" else raw), eol
+
+
+def _write_text(p: Path, text: str, eol: str) -> None:
+    with open(p, "w", encoding="utf-8", newline="") as f:
+        f.write(text.replace("\n", eol) if eol != "\n" else text)
+
+
 def write_file(path: str, content: str) -> str:
     p = Path(path).expanduser()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content)
+    eol = _read_text(p)[1] if p.is_file() else "\n"      # overwriting keeps the file's line endings
+    _write_text(p, content.replace("\r\n", "\n"), eol)
     return f"Wrote {len(content)} chars to {p}"
 
 
-def edit_file(path: str, old_string: str, new_string: str) -> str:
+def compute_edit(path: str, old_string: str = "", new_string: str = "", replace_all: bool = False,
+                 edits: list | None = None) -> tuple[str, str, str, str | None]:
+    """Apply one edit (old_string/new_string[/replace_all]) or several in order (edits=[{old_string,new_string,
+    replace_all}]) in memory. Returns (old_text, new_text, eol, error). Nothing is written, so a failing edit in a
+    batch leaves the file untouched."""
     p = Path(path).expanduser()
-    text = p.read_text()
-    n = text.count(old_string)
-    if n == 0:
-        return "ERROR: old_string not found"
-    if n > 1:
-        return f"ERROR: old_string appears {n} times, give more unique context"
-    p.write_text(text.replace(old_string, new_string))
-    return f"Edited {p}"
+    if not p.is_file():
+        return "", "", "\n", f"ERROR: {p} is not a file"
+    text, eol = _read_text(p)
+    todo = edits if edits else [{"old_string": old_string, "new_string": new_string, "replace_all": replace_all}]
+    if not isinstance(todo, list) or not all(isinstance(e, dict) for e in todo):
+        return text, text, eol, "ERROR: edits must be a list of {old_string, new_string, replace_all}"
+    cur = text
+    for i, e in enumerate(todo, 1):
+        old = str(e.get("old_string", "")).replace("\r\n", "\n")
+        new = str(e.get("new_string", "")).replace("\r\n", "\n")
+        tag = f"edit {i}: " if len(todo) > 1 else ""
+        if not old:
+            return text, text, eol, f"ERROR: {tag}old_string is empty"
+        if old == new:
+            return text, text, eol, f"ERROR: {tag}old_string and new_string are identical"
+        n = cur.count(old)
+        if n == 0:
+            return text, text, eol, f"ERROR: {tag}old_string not found"
+        if n > 1 and not e.get("replace_all"):
+            return text, text, eol, f"ERROR: {tag}old_string appears {n} times: add more context or set replace_all"
+        cur = cur.replace(old, new)
+    return text, cur, eol, None
+
+
+def edit_file(path: str, old_string: str = "", new_string: str = "", replace_all: bool = False,
+              edits: list | None = None) -> str:
+    _, new, eol, err = compute_edit(path, old_string, new_string, replace_all, edits)
+    if err:
+        return err
+    p = Path(path).expanduser()
+    _write_text(p, new, eol)
+    k = len(edits) if edits else 1
+    return f"Edited {p}" + (f" ({k} changes)" if k > 1 else "")
 
 
 # ------------------------------------------------------------------ cari
@@ -146,6 +189,107 @@ def bash(command: str) -> str:
     return _clip(f"exit={proc.returncode}\n{out}{err}")
 
 
+# ------------------------------------------------------------------ background tasks
+class _BgTask:
+    MAX_LINES = 3000
+
+    def __init__(self, tid: int, command: str):
+        import collections
+        import threading
+        import time
+        self.id, self.command, self.started = tid, command, time.time()
+        self.lines = collections.deque(maxlen=self.MAX_LINES)
+        self.dropped = 0                       # lines that fell off the front of the buffer
+        self.read_upto = 0                     # absolute line number the model has already seen
+        self.total = 0
+        self.lock = threading.Lock()
+        if IS_WIN:
+            self.proc = subprocess.Popen(_shell_cmd(command), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+                                         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
+        else:
+            self.proc = subprocess.Popen(command, shell=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT, text=True, errors="replace", start_new_session=True)
+        threading.Thread(target=self._pump, daemon=True).start()
+
+    def _pump(self) -> None:
+        for line in self.proc.stdout:
+            with self.lock:
+                if len(self.lines) == self.lines.maxlen:
+                    self.dropped += 1
+                self.lines.append(line.rstrip("\r\n"))
+                self.total += 1
+
+    @property
+    def running(self) -> bool:
+        return self.proc.poll() is None
+
+
+BG: dict[int, _BgTask] = {}
+
+
+def _bg_kill_all() -> None:
+    for t in BG.values():
+        if t.running:
+            _kill_group(t.proc)
+
+
+import atexit  # noqa: E402
+atexit.register(_bg_kill_all)           # never leave a dev server running after Emilie exits
+
+
+def _bg_status(t: _BgTask) -> str:
+    import time
+    age = int(time.time() - t.started)
+    return (f"running {age}s" if t.running else f"exited with code {t.proc.returncode}") + f" · {t.command[:80]}"
+
+
+def bash_bg(command: str) -> str:
+    """Start a long-running command (dev server, watcher, slow build) in the background and return at once."""
+    if not (command or "").strip():
+        return "ERROR: empty command"
+    if sum(1 for t in BG.values() if t.running) >= 8:
+        return "ERROR: 8 background tasks are already running; stop one with bg_stop"
+    tid = max(BG, default=0) + 1
+    try:
+        BG[tid] = _BgTask(tid, command)
+    except OSError as e:
+        return f"ERROR: {e}"
+    return (f"Started background task {tid}. Read its output with bg_output(id={tid}); stop it with bg_stop(id={tid}). "
+            f"It is stopped automatically when Emilie exits.")
+
+
+def bg_output(id: int = 0, tail: int = 60, all: bool = False) -> str:
+    """Output of a background task: only the lines you have not seen yet (or the last `tail` with all=true).
+    With no id, lists every background task."""
+    if not id:
+        return "\n".join(f"{t.id}: {_bg_status(t)}" for t in BG.values()) or "no background tasks"
+    t = BG.get(int(id))
+    if t is None:
+        return f"ERROR: no background task {id}"
+    with t.lock:
+        lines = list(t.lines)
+        first = t.total - len(lines)                 # absolute index of lines[0]
+        start = max(first, t.total - max(1, int(tail))) if all else max(first, t.read_upto)
+        chunk = lines[start - first:]
+        gap = start - t.read_upto if not all and start > t.read_upto else 0
+        t.read_upto = t.total
+    head = f"[task {t.id}: {_bg_status(t)}]"
+    if gap:
+        head += f"\n[{gap} older lines were dropped from the buffer]"
+    return _clip(head + "\n" + ("\n".join(chunk) if chunk else "(no new output)"))
+
+
+def bg_stop(id: int) -> str:
+    t = BG.get(int(id))
+    if t is None:
+        return f"ERROR: no background task {id}"
+    if not t.running:
+        return f"task {t.id} had already {_bg_status(t).split(' · ')[0]}"
+    _kill_group(t.proc)
+    return f"Stopped background task {t.id}"
+
+
 # ------------------------------------------------------------------ web
 class _Text(HTMLParser):
     SKIP = {"script", "style", "noscript", "svg", "head"}
@@ -190,6 +334,49 @@ def web_fetch(url: str) -> str:
     return _clip(text or "(empty)")
 
 
+def web_search(query: str, max_results: int = 8) -> str:
+    """Search the web through DuckDuckGo's HTML endpoint (no API key). Returns title, url and snippet per result."""
+    import html as _html
+    from urllib.parse import parse_qs, quote_plus, unquote
+    query = (query or "").strip()
+    if not query:
+        return "ERROR: empty query"
+    try:
+        n = max(1, min(int(max_results), 15))
+    except (TypeError, ValueError):
+        n = 8
+    req = urllib.request.Request(
+        "https://html.duckduckgo.com/html/", data=f"q={quote_plus(query)}".encode(),
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+                 "Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            page = r.read(1_500_000).decode("utf-8", errors="replace")
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        return f"ERROR: search failed: {e}"
+
+    def clean(s: str) -> str:
+        return " ".join(_html.unescape(re.sub(r"<[^>]+>", "", s)).split())
+
+    out = []
+    blocks = re.findall(r'<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>(.*?)(?=<a[^>]+class="result__a"|$)',
+                        page, re.S)
+    for href, title, rest in blocks:
+        href = _html.unescape(href)
+        if "uddg=" in href:
+            href = unquote(parse_qs(urlparse(href if href.startswith("http") else "https:" + href).query)
+                           .get("uddg", [href])[0])
+        if "duckduckgo.com/y.js" in href:      # sponsored result
+            continue
+        snip = re.search(r'class="result__snippet"[^>]*>(.*?)</a>', rest, re.S)
+        out.append(f"{len(out) + 1}. {clean(title)}\n   {href}" + (f"\n   {clean(snip.group(1))}" if snip else ""))
+        if len(out) >= n:
+            break
+    if not out:
+        return "no results (the search engine may have blocked the request; try web_fetch on a specific URL)"
+    return _clip("\n".join(out))
+
+
 def todo_write(todos: list) -> str:
     if not isinstance(todos, list):
         return "ERROR: todos must be a list"
@@ -206,6 +393,9 @@ def _schema(name, desc, props, required):
             "input_schema": {"type": "object", "properties": props, "required": required}}
 
 
+schema = _schema      # public alias for tools registered at runtime (e.g. the sub-agent)
+
+
 _s = {"type": "string"}
 _i = {"type": "integer"}
 _todo_item = {"type": "object", "properties": {
@@ -220,16 +410,37 @@ TOOLS = {
         {"path": _s, "offset": _i, "limit": _i}, ["path"]), "file", False),
     "write_file": (write_file, _schema("write_file", "Write/overwrite a file", {"path": _s, "content": _s},
                                        ["path", "content"]), "file", True),
-    "edit_file": (edit_file, _schema("edit_file", "Replace one unique string in a file",
-                                     {"path": _s, "old_string": _s, "new_string": _s},
-                                     ["path", "old_string", "new_string"]), "file", True),
+    "edit_file": (edit_file, _schema(
+        "edit_file", "Replace text in a file. Give old_string + new_string (old_string must be unique unless "
+                     "replace_all is true, e.g. to rename a variable). For several changes to ONE file pass "
+                     "edits=[{old_string,new_string,replace_all?}, ...]: they apply in order and either all succeed "
+                     "or the file is left untouched.",
+        {"path": _s, "old_string": _s, "new_string": _s, "replace_all": {"type": "boolean"},
+         "edits": {"type": "array", "items": {"type": "object", "properties": {
+             "old_string": _s, "new_string": _s, "replace_all": {"type": "boolean"}},
+             "required": ["old_string", "new_string"]}}},
+        ["path"]), "file", True),
     "grep": (grep, _schema("grep", "Search files with a regex", {"pattern": _s, "path": _s}, ["pattern"]),
              "search", False),
     "glob": (glob, _schema("glob", "Find files by glob pattern, e.g. **/*.py", {"pattern": _s, "path": _s},
                            ["pattern"]), "search", False),
     "bash": (bash, _schema("bash", "Run a shell command", {"command": _s}, ["command"]), "shell", True),
+    "bash_bg": (bash_bg, _schema(
+        "bash_bg", "Run a long-running command in the BACKGROUND (dev server, file watcher, slow build/test) and "
+                   "return immediately with a task id. Use plain bash for anything that finishes quickly.",
+        {"command": _s}, ["command"]), "shell", True),
+    "bg_output": (bg_output, _schema(
+        "bg_output", "Read new output of a background task (id), or with no id list all background tasks and whether "
+                     "they still run. all=true re-reads the last `tail` lines.",
+        {"id": _i, "tail": _i, "all": {"type": "boolean"}}, []), "shell", False),
+    "bg_stop": (bg_stop, _schema("bg_stop", "Stop a background task and its child processes.", {"id": _i}, ["id"]),
+                "shell", False),
     "web_fetch": (web_fetch, _schema("web_fetch", "Fetch the text of a web page", {"url": _s}, ["url"]),
                   "web", False),
+    "web_search": (web_search, _schema(
+        "web_search", "Search the web (DuckDuckGo). Returns titles, URLs and snippets; follow up with web_fetch on a "
+                      "promising URL to read the page. Use it for current events, docs, prices, anything you do not know.",
+        {"query": _s, "max_results": _i}, ["query"]), "web", False),
     "todo_write": (todo_write, _schema(
         "todo_write", "Record/update the task list for multi-step work (send the whole list).",
         {"todos": {"type": "array", "items": _todo_item}}, ["todos"]), "plan", False),
