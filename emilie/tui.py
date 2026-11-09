@@ -292,7 +292,16 @@ class TUI:
         self.last_act, self._frz, self._skew = time.monotonic(), None, 0.0
         self._tgt = None                         # smooth-scroll target line (None = idle)
         self._scroll_ev = threading.Event()
-        self._wheel_t, self._wheel_v = 0.0, 3.0
+        self._wheel_t, self._wheel_streak, self._wheel_dir = 0.0, 0, 0
+        self._scroll_lines, self._tau = 2, SMOOTH_TAU            # lines per wheel notch; easing time constant (s)
+        try:
+            from .effort import load_settings as _ls_scroll
+            cfg = _ls_scroll()
+            self._scroll_lines = max(1, min(10, int(cfg.get("scroll_lines") or 2)))
+            if cfg.get("scroll_smooth") is not None:
+                self._tau = max(0, min(300, int(cfg["scroll_smooth"]))) / 1000
+        except Exception:
+            pass
         self._lines, self._lines_key = [], None
         self._body, self._body_key, self._body_blink = [], None, set()
         self._body_users: list = []
@@ -592,6 +601,21 @@ class TUI:
         return (tr_("mouse ON: wheel scrolls, drag selects and copies inside the app")
                 if on else tr_("mouse OFF: the terminal selects text natively; scroll with PageUp / PageDown"))
 
+    def set_scroll(self, lines: int | None = None, smooth: int | None = None, reset: bool = False) -> str:
+        """Tune the wheel live. lines = lines per mouse notch (1-10); smooth = easing in ms (0 = instant, 300 = floaty)."""
+        from .effort import save_settings
+        if reset:
+            self._scroll_lines, self._tau = 2, SMOOTH_TAU
+            save_settings(scroll_lines=2, scroll_smooth=int(SMOOTH_TAU * 1000))
+        if lines is not None:
+            self._scroll_lines = max(1, min(10, int(lines)))
+            save_settings(scroll_lines=self._scroll_lines)
+        if smooth is not None:
+            self._tau = max(0, min(300, int(smooth))) / 1000
+            save_settings(scroll_smooth=int(self._tau * 1000))
+        return tr_("scroll: {0} lines per notch · easing {1} ms (/scroll lines <1-10> · /scroll smooth <0-300> · /scroll reset)",
+                   self._scroll_lines, int(self._tau * 1000))
+
     def set_borders(self, on: bool) -> str:
         from .effort import save_settings
         self.borders_anim = on
@@ -672,7 +696,7 @@ class TUI:
             from . import config, models as _models
             grade, mult_v = _models.BANKAI.get(st["model"], (None, None))
             host = urlparse(config.BASE_URL or "").netloc or config.PROVIDER
-            ctx, lim = st["ctx"], ag.effort.compact_at
+            ctx, lim = st["ctx"], ag.compact_limit()
             filled = min(10, round(ctx / 10))
             cc = "#3fa66b" if ctx < 60 else "#d99a2b" if ctx < 90 else "#d9534f"
             tg = ", ".join(info["tools"])
@@ -694,10 +718,11 @@ class TUI:
                 return [(LAV, f"{k:<9}"), (vs, v)]
 
             def hdr(text: str, w: int = 34):
-                """=-=-=-= judul =-=-=-=  (simetris; sisi kanan adalah cermin sisi kiri)"""
-                side = max(3, (w - len(text) - 2) // 2)
-                pat = ("=-" * side)[:side]
-                return [(MUTED, pat + " "), (f"bold {LAV}", text), (MUTED, " " + pat[::-1])]
+                """✧･ﾟ: *✧･ﾟ:* judul *:･ﾟ✧*:･ﾟ✧  (every glyph is one cell wide; a shorter pair if the panel is narrow)"""
+                left, right = "✧･ﾟ: *✧･ﾟ:*", "*:･ﾟ✧*:･ﾟ✧"
+                if len(left) + len(right) + len(text) + 2 > w:
+                    left, right = "✧･ﾟ:*", "*:･ﾟ✧"
+                return [(MUTED, left + " "), (f"bold {LAV}", text), (MUTED, " " + right)]
             ident = [
                 title,
                 [(f"bold {ROSE}", f"{st['model']}{mult}")],
@@ -952,25 +977,39 @@ class TUI:
             self.scroll, self.follow = new, new >= mx
             self._invalidate()
             return
-        base = self._tgt if self._tgt is not None else self._top_line()
-        self._tgt = max(0, min(mx, base + n))
+        top = self._top_line()
+        base = self._tgt if self._tgt is not None else top
+        vh = self._conv_vh()
+        # never let the target run more than one screen ahead of what is shown: a burst of events must not queue up
+        # a long glide that keeps scrolling after the fingers stopped
+        self._tgt = max(0, min(mx, base + n, top + vh) if n > 0 else max(base + n, top - vh))
         if self.follow and self._tgt < mx:        # leave "follow" now, but stay on the same line (no jump)
             self.scroll, self.follow = self._top_line(), False
         self._scroll_ev.set()
 
     def _wheel(self, direction: int) -> None:
-        """Mouse wheel tick with mild acceleration: slow flicks = 2 lines, a fast spin ramps up to 8."""
+        """One wheel event. The terminal cannot tell a mouse notch from a touchpad's stream of tiny movements, so
+        look at the timing:
+        - an isolated event (a mouse notch, or the first of a stream) = `scroll_lines` lines (setting, default 2)
+        - events that follow within 80 ms (touchpad drag, fast spin) = 1 line each, so a SLOW drag moves slowly
+          (before, every such event accelerated to 12 lines and a gentle touchpad scroll flew down the page);
+          only a long, fast stream ramps up, to at most 4 lines per event."""
         now = time.monotonic()
         gap = now - self._wheel_t
         self._wheel_t = now
-        self._wheel_v = min(12.0, self._wheel_v + 1.5) if gap < 0.09 else 3.0
-        self.scroll_by(direction * int(self._wheel_v))
+        if gap > 0.08 or direction != self._wheel_dir:
+            self._wheel_streak = 0
+        else:
+            self._wheel_streak += 1
+        self._wheel_dir = direction
+        step = self._scroll_lines if self._wheel_streak == 0 else min(4, 1 + self._wheel_streak // 15)
+        self.scroll_by(direction * step)
 
     def _smooth_loop(self) -> None:
         """Time-based exponential ease-out on a FLOAT position (sub-line precision), drawn as whole lines.
         Speed depends on real elapsed time (dt), not on frame count, so a slow frame never makes the motion
         stutter or slow down; a redraw is only requested when the visible line actually changes."""
-        tau, poll = SMOOTH_TAU, 1 / 120
+        poll = 1 / 120
         while True:
             self._scroll_ev.wait()
             self._scroll_ev.clear()
@@ -986,7 +1025,8 @@ class TUI:
                 tgt = min(want, mx)
                 if abs(self.scroll - round(pos)) > 1:          # position was moved from outside: resync
                     pos = float(self._top_line())
-                pos += (tgt - pos) * (1.0 - math.exp(-dt / tau))
+                tau = self._tau                                # read every frame: /scroll smooth applies at once
+                pos = float(tgt) if tau <= 0.001 else pos + (tgt - pos) * (1.0 - math.exp(-dt / tau))
                 if abs(tgt - pos) < 0.5:                       # landed
                     pos = float(tgt)
                     if self._tgt == want:                      # no new wheel input arrived meanwhile
@@ -1063,7 +1103,7 @@ class TUI:
             alt = (LAV, " | ")
             up = int(time.monotonic() - self.t0)
             branch = self._git_branch()
-            segs = [[("", " "), (f"bold {ROSE}", "(^_^) "), ("", f"{st['model']}{mult}")],
+            segs = [[("", " "), (f"bold {ROSE}", "❀ "), ("", f"{st['model']}{mult}")],
                     [(MUTED, st["cwd"])] + ([(LAV, f"  git:{branch}")] if branch else []),
                     [(mode_cls, st["mode_label"])],
                     [("", f"effort {st['effort']}")],
@@ -1843,6 +1883,9 @@ class TuiHooks:
 
     def set_mouse(self, on):
         return self.tui.set_mouse(on)
+
+    def set_scroll(self, **kw):
+        return self.tui.set_scroll(**kw)
 
     def history(self):
         self.tui.console.print(tr_('[{MUTED}]scroll the conversation with the mouse wheel / PageUp / PageDown[/]', MUTED=MUTED))

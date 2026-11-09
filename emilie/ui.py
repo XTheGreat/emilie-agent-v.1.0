@@ -14,7 +14,7 @@ from .i18n import t as tr_, N_
 from .theme import ADD, DEL, ERR, LAV, MUTED, OK, ROSE, WARN
 
 LABELS = {"bash": "Bash", "bash_bg": "Bash(bg)", "bg_output": "BgOutput", "bg_stop": "BgStop", "write_file": "Write", "edit_file": "Update",
-          "read_file": "Read", "grep": "Search", "glob": "Glob", "web_fetch": "Fetch", "web_search": "WebSearch", "task": "Task",
+          "read_file": "Read", "grep": "Search", "glob": "Glob", "web_fetch": "Fetch", "web_search": "WebSearch", "task": "Task", "tasks": "Tasks", "exit_plan_mode": "Plan",
           "todo_write": "Todos", "use_skill": "Skill"}
 
 
@@ -43,6 +43,11 @@ def _target(name: str, args: dict) -> str:
         return args.get("query", "")
     if name == "task":
         return args.get("description", "")
+    if name == "tasks":
+        return ", ".join(str(j.get("description", "?")) for j in args.get("jobs", []) if isinstance(j, dict))[:100]
+    if name == "exit_plan_mode":
+        first = next((l.strip(" #*-") for l in str(args.get("plan", "")).splitlines() if l.strip()), "")
+        return first[:80]
     if name == "todo_write":
         return f"{len(args.get('todos', []))} item"
     if "path" in args:
@@ -64,7 +69,8 @@ def tool_result(console: Console, name: str, out: str, dt: float | None = None) 
     err = out.startswith("ERROR") or (name == "bash" and not out.startswith("exit=0"))
     if name == "read_file" and not err:
         n = sum(1 for l in lines if re.match(r"\s*\d+\t", l))
-        summary = [tr_('Read {n} lines', n=n) + (" (partial)" if any(l.startswith("...[lines") for l in lines) else "")]
+        summary = ([tr_('Read {n} lines', n=n) + (" (partial)" if any(l.startswith("...[lines") for l in lines) else "")]
+                   if n else [_one_line(lines[0], 80)])      # PDF, notebook, image: not a numbered text file
     elif name == "glob":
         summary = ["no files" if lines == ["no matches"] else f"{len(lines)} file"]
     elif name == "web_fetch" and not err:
@@ -106,7 +112,7 @@ def make_preview(name: str, args: dict) -> Text | None:
         elif name == "write_file":
             p = Path(args["path"]).expanduser()
             old = p.read_text() if p.exists() else ""
-            new = args["content"]
+            new = old + args["content"] if args.get("append") else args["content"]
         else:
             return None
     except (OSError, KeyError, UnicodeDecodeError):
@@ -173,8 +179,21 @@ def read_key() -> str:
         return b.decode(errors="ignore").lower()
 
 
+def plan_panel(plan: str) -> tuple[Panel, Text]:
+    """The plan the model wants approved (exit_plan_mode): the plan as markdown + three clear choices."""
+    from rich.markdown import Markdown
+    opts = Text()
+    opts.append("[y]", style=f"bold {OK}"); opts.append(tr_(" approve, ask before each change   "))
+    opts.append("[t]", style=f"bold {ROSE}"); opts.append(tr_(" approve and run on its own   "))
+    opts.append("[n]", style=f"bold {ERR}"); opts.append(tr_(" keep planning"))
+    return (Panel(Markdown((plan or "(empty plan)")[:8000]), title=tr_('[bold {LAV}]plan: ready to start?[/]', LAV=LAV),
+                  title_align="left", border_style=LAV, padding=(0, 1)), opts)
+
+
 def permission_panel(name: str, args: dict, reason: str) -> tuple[Panel, Text]:
     """(detail panel, choice lines) - used by both classic and full-screen mode."""
+    if name == "exit_plan_mode":
+        return plan_panel(str(args.get("plan", "")))
     body = [Text(_target(name, args)[:2500], style="bold")]
     if reason:
         body.append(Text(f"! {reason}", style=WARN))

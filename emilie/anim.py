@@ -7,6 +7,7 @@ from prompt_toolkit.mouse_events import MouseEventType
 from .i18n import t as tr_
 from .logo import Sprite
 from .theme import MUTED, ROSE, LAV, flow_hex
+from .tools import shorten as _shorten_tools
 
 _H = [f"{i:02x}" for i in range(256)]
 
@@ -106,7 +107,7 @@ def banner_fragments(sprite: Sprite, t: float, width: int, info: dict) -> list[t
         [(f"bold {LAV}", "Tools")],
     ]
     for g, names in info["tools"].items():
-        right.append([(LAV, f"  {g:<7}"), ("", ", ".join(names))])
+        right.append([(LAV, f"  {g:<7}"), ("", ", ".join(_shorten_tools(names)))])
     right += [[], [(f"bold {LAV}", "Tips")]]
     for k, v in [(tr_('shift+tab'), tr_('switch mode ask/trust/plan')), ("@file", tr_('include a file')),
                  ("!command", tr_('run a shell command')), ("ctrl+v", tr_('paste an image')),

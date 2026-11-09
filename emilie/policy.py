@@ -4,7 +4,7 @@ import shlex
 from pathlib import Path
 from .i18n import t as tr_, N_
 
-READONLY_TOOLS = {"read_file", "grep", "glob", "todo_write", "use_skill", "web_search", "task",   # task = read-only sub-agent
+READONLY_TOOLS = {"read_file", "grep", "glob", "todo_write", "use_skill", "web_search", "task", "tasks",   # task(s) = read-only sub-agents
                   "bg_output", "bg_stop"}                  # only touch background tasks Emilie itself started
 MODES = ("ask", "trust", "plan")
 
@@ -222,11 +222,13 @@ class Policy:
     def check(self, name: str, args: dict) -> tuple[str, str]:
         """return ("allow"|"ask"|"deny", alasan)"""
         plan = self.mode == "plan"
-        if name in READONLY_TOOLS:
-            return "allow", ""
-        for r in self._rules("deny"):
+        for r in self._rules("deny"):                 # first, so a deny rule can also block read tools (e.g. .env files)
             if self._rule_match(r, name, args):
                 return "deny", tr_('blocked by your rule: {r}', r=r)
+        if name == "exit_plan_mode":                  # the user must approve a plan; outside plan mode it is a no-op
+            return ("ask", "") if plan else ("allow", "")
+        if name in READONLY_TOOLS:
+            return "allow", ""
         if not plan and any(self._rule_match(r, name, args) for r in self._rules("allow")):
             if name not in ("bash", "bash_bg") or not self.danger_reason(args.get("command", "")):   # a dangerous command still asks
                 return "allow", ""

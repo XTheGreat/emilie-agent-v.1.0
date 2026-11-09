@@ -75,7 +75,9 @@ def main() -> int:
 
     tick()
     root.mainloop()
-    return 0
+    # Leave NOW. A normal exit waits for the reader thread, which is blocked reading stdin: on Windows that took ~6 s
+    # and then crashed (0xC0000005), so the app only noticed the closed window seconds later.
+    os._exit(0)
 
 
 if __name__ == "__main__":

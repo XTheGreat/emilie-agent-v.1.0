@@ -38,6 +38,36 @@ BANKAI_VISION = {"claude-opus-5", "claude-opus-5-5", "claude-sonnet-5", "gemini-
                  "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "kimi-k2.8"}
 
 
+import re as _re
+
+# Context windows I am sure about, for models too small for the effort levels' limits. Anything else is unknown (None):
+# set it yourself with /config context_limit <tokens>. Matched against the lower-cased model name.
+_SMALL_CONTEXT = [
+    (r"llama-?2", 4096), (r"gemma-(2b|7b)|recurrentgemma", 8192), (r"codellama|starcoder2", 16384),
+    (r"mistral-7b", 32768),
+]
+
+
+def context_window(name: str, override: int | None = None) -> int | None:
+    """The model's context window in tokens: the user's /config context_limit, else a known small model, else None."""
+    if override:
+        return int(override)
+    low = (name or "").lower()
+    for rx, n in _SMALL_CONTEXT:
+        if _re.search(rx, low):
+            return n
+    return None
+
+
+def price(settings: dict) -> tuple[float, float] | None:
+    """(USD per 1M input tokens, per 1M output tokens) when the user set both (/config price_in, price_out)."""
+    pi, po = settings.get("price_in"), settings.get("price_out")
+    try:
+        return (float(pi), float(po)) if pi is not None and po is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def multiplier(name: str) -> float | None:
     return BANKAI.get(name, (None, None))[1]
 

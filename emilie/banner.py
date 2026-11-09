@@ -10,6 +10,7 @@ from .i18n import t as tr_
 from . import __version__
 from . import logo
 from .theme import LAV, MUTED, ROSE
+from .tools import shorten
 
 FALLBACK = """\
    ⣀⣤⣤⣀
@@ -44,7 +45,7 @@ def print_banner(console: Console, model: str, tool_groups: dict[str, list[str]]
     right.append("Tools\n", style=f"bold {LAV}")
     for group, names in tool_groups.items():
         right.append(f"  {group:<7}", style=LAV)
-        right.append(", ".join(names) + "\n")
+        right.append(", ".join(shorten(names)) + "\n")
     right.append("\nTips\n", style=f"bold {LAV}")
     for k, v in [(tr_('shift+tab'), tr_('switch mode ask/trust/plan')), ("@file", tr_('include a file')),
                  ("!command", tr_('run a shell command')), ("ctrl+v", tr_('paste an image')),

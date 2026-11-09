@@ -92,7 +92,7 @@ def _show_mcp(console: Console) -> None:
     for s_ in mcp.SERVERS.values():
         st = {"ready": f"[{OK}]ready[/]", "failed": f"[{ERR}]failed[/]"}.get(s_.status, f"[{WARN}]{s_.status}[/]")
         t.add_row(s_.name, st + (f" [{MUTED}]{s_.error[:50]}[/]" if s_.error else ""), str(len(s_.tool_names)),
-                  f"{s_.command} {' '.join(map(str, s_.args))}"[:60])
+                  (s_.url if s_.url else f"{s_.command} {' '.join(map(str, s_.args))}")[:60])
     if not mcp.SERVERS:
         t.add_row("-", "-", "-", tr_('none configured'))
     console.print(Panel(t, title=tr_('[bold {ROSE}]MCP servers[/]', ROSE=ROSE), title_align="left", border_style=MUTED,
@@ -116,7 +116,7 @@ def _show_effort(console: Console, agent: Agent) -> None:
 def _context(console: Console, agent: Agent) -> None:
     from .agent import est_tokens
     sysn, hist, tl = est_tokens(agent.system_prompt()), est_tokens(agent.messages), est_tokens(tools.SCHEMAS)
-    total, limit = sysn + hist + tl, agent.effort.compact_at
+    total, limit = sysn + hist + tl, agent.compact_limit()
     t = Table.grid(padding=(0, 2))
     t.add_row(tr_('system + memory'), f"~{_k(sysn)}")
     t.add_row(tr_('tool definitions'), f"~{_k(tl)}")
@@ -138,6 +138,12 @@ def _cost(console: Console, agent: Agent) -> None:
     m = models.multiplier(agent.model)
     if m:
         t.add_row(tr_('[{MUTED}]weighted ×{m:g}[/]', MUTED=MUTED, m=m), f"[{MUTED}]{tag}{int((u.inp + u.out) * m):,}[/]")
+    pr = models.price(eff.load_settings())
+    if pr:
+        usd = (u.inp * pr[0] + u.out * pr[1]) / 1_000_000
+        t.add_row(tr_('[bold]estimated cost[/]'), f"[bold]{tag}${usd:,.4f}[/]  [{MUTED}]({pr[0]:g} in / {pr[1]:g} out per 1M tokens)[/]")
+    else:
+        t.add_row(f"[{MUTED}]cost[/]", f"[{MUTED}]set /config price_in and price_out (USD per 1M tokens) to see it[/]")
     note = tr_('exact numbers from the provider') if u.exact else tr_('estimate: the provider sends no usage data')
     console.print(Panel(t, title=tr_('[bold {ROSE}]session usage[/]', ROSE=ROSE), title_align="left",
                         border_style=MUTED, subtitle=f"[{MUTED}]{note}[/]", padding=(1, 2)))
@@ -227,7 +233,7 @@ def _scrollback(console: Console) -> None:
 
 
 class Core:
-    """The application core shared by both interfaces (full-screen & classic)."""
+    """The application core: the full-screen UI, `emilie -p`, and the plain fallback when there is no terminal."""
 
     def __init__(self, **kw):
         self.__dict__.update(kw)
@@ -268,7 +274,7 @@ def make_core(console: Console, argv: list[str], hooks) -> Core:
 
     def status() -> dict:
         home = os.path.expanduser("~")
-        pct = min(999, agent.ctx_tokens() * 100 // agent.effort.compact_at)
+        pct = min(999, agent.ctx_tokens() * 100 // agent.compact_limit())
         return {"model": agent.active_model, "mult": models.multiplier(agent.active_model),
                 "cwd": short_cwd(), "mode": policy.mode,
                 "mode_label": tr_(MODE_LABEL[policy.mode]), "effort": agent.effort.name, "ctx": pct}
@@ -317,6 +323,11 @@ def make_core(console: Console, argv: list[str], hooks) -> Core:
                                 border_style=ERR, padding=(0, 1)))
         except Exception as e:
             body = f"{type(e).__name__}: {e}"[:800]
+            if "timeout" in type(e).__name__.lower() or "timed out" in str(e).lower():
+                from .agent import request_timeout
+                body += "\n" + tr_("the model did not answer within {0}s: it may be overloaded or queueing. Try again, "
+                                   "or switch with /model (change the wait with \"timeout\" in ~/.emilie/settings.json).",
+                                   int(request_timeout()))
             if agent.salvaged:
                 body += "\n" + tr_("your progress is kept ({0} steps) · /model to switch, then type 'continue'", agent.salvaged)
             console.print(Panel(body, title=tr_('[bold]error[/]'), border_style=ERR, title_align="left"))
@@ -397,6 +408,25 @@ def make_core(console: Console, argv: list[str], hooks) -> Core:
                 else:
                     console.print(f"[{OK}]restored:[/] " + ", ".join(os.path.relpath(p) for p in done)
                                   + tr_('  [{MUTED}](changes made through bash are not undone)[/]', MUTED=MUTED))
+            elif cmd == "/doctor":
+                from . import doctor
+                from .config import PROVIDER_ID
+                console.print(tr_('[{MUTED}]testing {0} on {1} with a few small real calls (about 2000 tokens)...[/]',
+                                  agent.model, PROVIDER_ID or PROVIDER, MUTED=MUTED))
+
+                def _show(r):
+                    mark, style = ("✓", OK) if r.ok else (("–", MUTED) if r.ok is None else ("✗", ERR))
+                    console.print(f"  [{style}]{mark}[/] {r.label:<30} [{MUTED}]{r.detail}" + (f"  ({r.secs:.1f}s)" if r.secs else "") + "[/]")
+
+                try:
+                    results = doctor.run_all(agent.client, PROVIDER, agent.model, _show)
+                    doctor.save_profile(PROVIDER_ID or PROVIDER, agent.model, results)
+                    for line in doctor.advice(results):
+                        console.print(f"[{WARN}]! {line}[/]")
+                    if not doctor.advice(results) and results and all(r.ok for r in results):
+                        console.print(tr_('[{OK}]everything works with this model[/]', OK=OK))
+                except KeyboardInterrupt:
+                    console.print(tr_('[{MUTED}]stopped[/]', MUTED=MUTED))
             elif cmd == "/thinking":
                 from . import claude as _claude
                 cur = int(eff.load_settings().get("thinking") or 0)
@@ -480,15 +510,98 @@ def make_core(console: Console, argv: list[str], hooks) -> Core:
                     console.print(tr_('[{MUTED}]model →[/] [bold {ROSE}]{chosen}[/][{MUTED}]{extra} (saved)[/]', MUTED=MUTED, ROSE=ROSE, chosen=chosen, extra=extra))
                 elif chosen:
                     console.print(tr_('[{MUTED}]model unchanged:[/] {0}', agent.model, MUTED=MUTED))
-            elif cmd in ("/history", "/scroll"):
+            elif cmd == "/history":
                 hooks.history()
-            elif cmd in ("/ui", "/screen"):
-                if arg in ("tui", "classic", "alt", "main"):
-                    key = "ui" if arg in ("tui", "classic") else "screen"
-                    eff.save_settings(**{key: arg})
-                    console.print(tr_('[{MUTED}]{key} →[/] [bold {ROSE}]{arg}[/] [{MUTED}](applies the next time emilie starts)[/]', MUTED=MUTED, key=key, ROSE=ROSE, arg=arg))
+            elif cmd == "/schedule":
+                import shlex
+                from . import schedule
+                from rich.markup import escape as _esc
+                try:
+                    a = shlex.split(arg)
+                except ValueError as e:
+                    a = ["?"]
+                    console.print(f"[{ERR}]{_esc(str(e))}[/]", highlight=False, markup=True)
+                trust_flag = "--trust" in a
+                a = [x for x in a if x != "--trust"]
+                if not a:
+                    for line in schedule.listing():
+                        console.print(f"[{MUTED}]{_esc(line)}[/]", highlight=False, markup=True)
+                    console.print(tr_('[{MUTED}]/schedule add <name> <daily|hourly|weekly|once> <HH:MM> "<prompt>" [--trust]  ·  /schedule rm <name>  ·  /schedule run <name>[/]', MUTED=MUTED))
+                elif a[0] == "add" and len(a) == 5:
+                    res = schedule.add(a[1], a[2].lower(), a[3], a[4], os.getcwd(), trust=trust_flag)
+                    console.print(f"[{ERR if res.startswith('ERROR') else OK}]{_esc(res)}[/]", highlight=False, markup=True)
+                elif a[0] in ("rm", "run") and len(a) == 2:
+                    res = (schedule.remove if a[0] == "rm" else schedule.run_now)(a[1])
+                    console.print(f"[{ERR if res.startswith('ERROR') else OK}]{_esc(res)}[/]", highlight=False, markup=True)
+                elif a != ["?"]:
+                    console.print(tr_('[{ERR}]usage: /schedule add <name> <daily|hourly|weekly|once> <HH:MM> "<prompt>" [--trust][/]', ERR=ERR))
+            elif cmd == "/export":
+                from . import export
+                _p, msg = export.save(agent.messages, arg.strip(), agent.model, os.getcwd())
+                from rich.markup import escape as _esc
+                console.print(f"[{OK if _p else ERR}]{_esc(msg)}[/]", highlight=False, markup=True)
+            elif cmd == "/permissions":
+                from . import config_cmds
+                if arg.strip() == "reset":
+                    policy.always.clear()
+                    console.print(tr_("[{MUTED}]forgot this session's 'always' answers[/]", MUTED=MUTED))
                 else:
-                    console.print(tr_('[{MUTED}]/ui tui = full-screen (default: the video banner scrolls with the chat) · /ui classic = plain terminal (native scrollback)[/]', MUTED=MUTED))
+                    for line in config_cmds.permissions_summary(policy.mode, eff.load_settings(), policy.always):
+                        console.print(f"[{MUTED}]{line}[/]", highlight=False, markup=True)
+            elif cmd == "/config":
+                from . import config_cmds
+                parts = arg.split(None, 1)
+                cur = eff.load_settings()
+                if not parts:
+                    t = Table.grid(padding=(0, 2))
+                    for name, val, when, desc in config_cmds.rows(cur):
+                        t.add_row(f"[bold {ROSE}]{name}[/]", val, f"[{MUTED}]{when}[/]", f"[{MUTED}]{desc}[/]")
+                    console.print(t)
+                    console.print(tr_('[{MUTED}]/config <name> <value>  ·  /config <name> default  ·  live = applies now, restart = next start[/]', MUTED=MUTED))
+                elif len(parts) == 1 and parts[0] in config_cmds.KEYS:
+                    r = [x for x in config_cmds.rows(cur) if x[0] == parts[0]][0]
+                    console.print(f"[bold {ROSE}]{r[0]}[/] {r[1]}  [{MUTED}]({r[2]}) {r[3]}[/]", highlight=False, markup=True)
+                elif len(parts) == 2:
+                    value, err = config_cmds.parse(parts[0], parts[1])
+                    if err:
+                        console.print(f"[{ERR}]{err}[/]", highlight=False, markup=True)
+                    else:
+                        key = config_cmds.KEYS[parts[0]]
+                        if value is None:
+                            eff.unset_settings(parts[0])             # back to the built-in default
+                        else:
+                            eff.save_settings(**{parts[0]: value})
+                        if parts[0] == "effort":
+                            agent.set_effort(eff.load_effort())
+                        elif parts[0] in ("scroll_lines", "scroll_smooth"):
+                            hooks.set_scroll(**{parts[0].replace("scroll_", ""): value if value is not None else key.default})
+                        when = tr_('applied now') if key.live else tr_('saved; applies the next time Emilie starts')
+                        console.print(tr_('[{MUTED}]{0} = {1}  ({2})[/]', parts[0], "default" if value is None else value, when, MUTED=MUTED))
+                else:
+                    console.print(tr_('[{ERR}]unknown setting: {0}  (/config lists them)[/]', parts[0], ERR=ERR))
+            elif cmd == "/fallback":
+                name = arg.strip()
+                cur = eff.load_settings().get("fallback_model")
+                if not name:
+                    console.print(tr_('[{MUTED}]fallback model:[/] {0}  [{MUTED}](/fallback <model> | /fallback off). Used when the main model keeps failing (busy, rate limit, timeout).[/]',
+                                      cur or "off", MUTED=MUTED))
+                elif name.lower() == "off":
+                    eff.save_settings(fallback_model=None)
+                    console.print(tr_('[{MUTED}]fallback model: off[/]', MUTED=MUTED))
+                else:
+                    eff.save_settings(fallback_model=name)
+                    console.print(tr_('[{MUTED}]fallback model →[/] [bold {ROSE}]{0}[/] [{MUTED}](saved; same provider as the main model)[/]',
+                                      name, MUTED=MUTED, ROSE=ROSE))
+            elif cmd == "/scroll":
+                a = arg.split()
+                if a[:1] == ["reset"]:
+                    console.print(f"[{MUTED}]{hooks.set_scroll(reset=True)}[/]")
+                elif len(a) == 2 and a[0] in ("lines", "smooth") and a[1].isdigit():
+                    console.print(f"[{MUTED}]{hooks.set_scroll(**{a[0]: int(a[1])})}[/]")
+                elif not a:
+                    console.print(f"[{MUTED}]{hooks.set_scroll()}[/]")
+                else:
+                    console.print(tr_('[{ERR}]usage: /scroll | /scroll lines <1-10> | /scroll smooth <0-300> | /scroll reset[/]', ERR=ERR))
             elif cmd == "/camera":
                 from . import camera
                 sub = arg.split()
@@ -621,7 +734,7 @@ def make_core(console: Console, argv: list[str], hooks) -> Core:
                     voice.VOICE.set(talk_model=val)
                     console.print(tr_('[{MUTED}]speech model: {val} (downloads on first use)[/]', MUTED=MUTED, val=val))
                 elif tui is None:
-                    console.print(tr_('[{ERR}]talk mode needs the full-screen UI (not --classic)[/]', ERR=ERR))
+                    console.print(tr_('[{ERR}]talk mode needs the full-screen UI[/]', ERR=ERR))
                 elif sub_cmd in ("on", "off", ""):
                     want = (sub_cmd != "off") if sub_cmd else not talk.TALK.on
                     if want != talk.TALK.on:
@@ -662,6 +775,19 @@ def make_core(console: Console, argv: list[str], hooks) -> Core:
                     console.print(tr_('[{MUTED}]{0} (saved)[/]', hooks.set_borders(arg == 'on'), MUTED=MUTED))
                 else:
                     console.print(tr_('[{MUTED}]/borders on|off  (Alt+B toggles) - animated gradient borders; off saves CPU[/]', MUTED=MUTED))
+            elif cmd in ("/review", "/commit", "/pr"):
+                from . import gitcmds
+                limit = agent.effort.tool_out_chars * 3          # how much diff the model gets (30k chars at medium)
+                brief = {"/review": gitcmds.review_brief, "/commit": gitcmds.commit_brief,
+                         "/pr": gitcmds.pr_brief}[cmd](arg, limit)
+                if brief is None:
+                    why = {"/review": 'nothing to review here (not a git repository, an unknown ref, or no changes)',
+                           "/commit": 'nothing to commit here (not a git repository, or no changes)',
+                           "/pr": 'cannot draft a pull request (not a git repository, no base branch, or no commits on this branch)'}[cmd]
+                    console.print(tr_('[{MUTED}]{0}[/]', why, MUTED=MUTED))
+                else:
+                    console.print(tr_('[{MUTED}]  ⎿ {0} {1}[/]', cmd, arg or "", MUTED=MUTED))
+                    run(brief, sub.images)
             elif cmd == "/dev":
                 console.print(tr_('[{MUTED}]  ⎿ development workflow: {0}[/]', arg or "…", MUTED=MUTED))
                 run(skills.dev_message(arg), sub.images)
@@ -693,7 +819,8 @@ def make_core(console: Console, argv: list[str], hooks) -> Core:
         if text.startswith("!") and len(text) > 1:
             cmd = text[1:].strip()
             try:
-                out = tools.bash(cmd).split("\n", 1)[1].rstrip() or "(no output)"
+                res = tools.bash(cmd)       # "exit=N\n<output>", or a one-line "ERROR: timeout 120s" (no newline)
+                out = (res.split("\n", 1)[1] if "\n" in res else res).rstrip() or "(no output)"
             except KeyboardInterrupt:
                 console.print(tr_('[{ERR}]stopped[/]', ERR=ERR))
                 return None
@@ -748,6 +875,9 @@ class _ClassicHooks:
     def set_mouse(self, on):
         return tr_("mouse settings apply to the full-screen UI only")
 
+    def set_scroll(self, **kw):
+        return tr_("scroll settings apply to the full-screen UI only")
+
     def set_borders(self, on):
         return tr_('animated borders apply to the full-screen UI only')
 
@@ -760,6 +890,7 @@ class _ClassicHooks:
 
 
 def main_classic(argv: list[str]) -> None:
+    """The plain inline interface: only the fallback when there is no real terminal (pipes, scripts)."""
     if trust.needed(argv):
         from .gate import text_gate
         if not text_gate(os.getcwd()):
@@ -871,6 +1002,21 @@ def main_print(argv: list[str], prompt: str) -> int:
 
 
 # ======================================================================= entri
+_MOUSE_OFF = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l"
+
+
+def _reset_terminal_modes() -> None:
+    """Switch OFF mouse reporting. A session that ended badly (closed window, killed process, crash) leaves it on, and
+    then every mouse movement is typed into the prompt as garbage like '[555;24;34M'. Done at start (cleans up after
+    an earlier run) and at exit (so this run cannot leave it behind either)."""
+    try:
+        if sys.stdout.isatty():
+            sys.stdout.write(_MOUSE_OFF)
+            sys.stdout.flush()
+    except Exception:
+        pass
+
+
 def main() -> None:
     argv = sys.argv[1:]
     if os.name == "nt":
@@ -881,6 +1027,9 @@ def main() -> None:
                 sys.exit(130)
         from .term import enable_vt_output
         enable_vt_output()
+    import atexit
+    _reset_terminal_modes()
+    atexit.register(_reset_terminal_modes)
     if "--untrust" in argv:                      # forget the "trust this folder" answer for the current folder
         print(tr_("folder no longer trusted: {0}", os.getcwd()) if trust.remove()
               else tr_("this folder was not in the trusted list: {0}", os.getcwd()))
@@ -915,12 +1064,11 @@ def main() -> None:
         print_banner(console, core.agent.model, tools.groups(), effort=core.agent.effort.name,
                      mode=tr_(MODE_LABEL[core.policy.mode]))
         return
-    mode = "classic" if "--classic" in argv else (paths.env("UI") or eff.load_settings().get("ui", "tui"))
-    if mode == "tui" and sys.stdin.isatty() and sys.stdout.isatty():
+    if sys.stdin.isatty() and sys.stdout.isatty():
         from .tui import run_tui
         run_tui(argv, make_core)
         return
-    main_classic(argv)
+    main_classic(argv)           # no real terminal (pipes, scripts): plain fallback, not offered as an option
 
 
 if __name__ == "__main__":

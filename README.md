@@ -61,6 +61,32 @@ Every MCP tool call asks for permission first.
 `/help` lists everything. Useful ones: `/mcp`, `/effort`, `/logo size <n>`, `/voice`, `/camera`, `/history`.
 Project instructions go in `EMILIE.md`; skills in `.emilie\skills\`.
 
+## More commands
+
+| | |
+|---|---|
+| `/plan` then approve | In plan mode Emilie investigates, then shows a plan: **y** approve (asks per change), **t** approve and run on its own, **n** keep planning |
+| `/review`, `/commit`, `/pr` | Review changes (`/review`, `/review <branch>`, `/review <PR#>`), write the commit message and commit (never pushes), draft a PR title and body |
+| `/rewind` | Go back to before an earlier turn: files, chat, or both |
+| `/allow`, `/deny`, `/permissions` | Permanent allow/deny rules (`mcp__browser__*`, `bash(git *)`, `read_file(*.env*)`) and an overview |
+| `/config` | See and change settings (`/config timeout 300`); `live` ones apply at once |
+| `/fallback <model>` | Backup model used when the main one keeps failing; busy/rate-limit errors are retried first |
+| `/doctor` | Test what the current model supports (chat, streaming, tools, vision) |
+| `/export [file.md]` | Save the conversation as markdown |
+| `/schedule` | Run a prompt on a timer with the Windows Task Scheduler (read-only unless you pass `--trust`) |
+| `/cost` | Token usage; set `/config price_in` and `price_out` (USD per 1M tokens) for a cost estimate |
+| `emilie -p "prompt"` | One non-interactive turn for scripts; `--trust` allows edits, exit code 2 = something was denied |
+
+`read_file` also reads PDFs (`pages="1-5"`), notebooks and images. The `tasks` tool runs up to four read-only sub-agents in
+parallel. MCP servers can be remote too: `{"url": "https://...", "headers": {"Authorization": "Bearer ${TOKEN}"}}`.
+Global instructions go in `%USERPROFILE%\.emilie\EMILIE.md` (loaded for every project, before the project's own file).
+
+## Scrolling
+
+The conversation scrolls inside Emilie (mouse wheel, touchpad, PageUp/PageDown). Tune the feel live with `/scroll`:
+`/scroll lines <1-10>` (lines per mouse-wheel notch) and `/scroll smooth <0-300>` (milliseconds of easing, 0 = instant).
+The settings are saved in `%USERPROFILE%\.emilie\settings.json`.
+
 ## Linux
 
 It also runs on Linux: `pip install -e .` then `emilie`.
