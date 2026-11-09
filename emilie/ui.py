@@ -15,7 +15,9 @@ from .theme import ADD, DEL, ERR, LAV, MUTED, OK, ROSE, WARN
 
 LABELS = {"bash": "Bash", "bash_bg": "Bash(bg)", "bg_output": "BgOutput", "bg_stop": "BgStop", "write_file": "Write", "edit_file": "Update",
           "read_file": "Read", "grep": "Search", "glob": "Glob", "web_fetch": "Fetch", "web_search": "WebSearch", "task": "Task", "tasks": "Tasks", "exit_plan_mode": "Plan",
-          "todo_write": "Todos", "use_skill": "Skill"}
+          "todo_write": "Todos", "use_skill": "Skill",
+          "notebook_edit": "Notebook", "notebook_run": "NotebookRun", "docx_read": "Docx", "docx_edit": "DocxEdit",
+          "docx_create": "DocxNew", "xlsx_read": "Xlsx", "xlsx_write": "XlsxEdit", "pptx_read": "Pptx"}
 
 
 def label(name: str) -> str:
@@ -81,6 +83,10 @@ def tool_result(console: Console, name: str, out: str, dt: float | None = None) 
         summary = lines[:1]
     elif name in {"write_file", "edit_file"}:
         summary = lines[:1]
+    elif name in {"notebook_edit", "docx_edit", "docx_create", "xlsx_write"}:
+        summary = [_one_line(l, 100) for l in lines[:4] if l.strip()]
+    elif name in {"docx_read", "xlsx_read", "pptx_read"} and not err:
+        summary = [_one_line(lines[0], 100)]
     elif name == "grep":
         summary = [lines[0] if lines == ["no matches"] else f"{len(lines)} kecocokan"]
     else:  # bash
@@ -250,8 +256,10 @@ def print_todos(console: Console, todos: list[dict]) -> None:
     t = Text()
     for i, it in enumerate(todos):
         st = it.get("status")
-        mark, style = {"completed": ("☑", f"{MUTED} strike"), "in_progress": ("◐", f"bold {ROSE}")}.get(st, ("☐", ""))
-        t.append(f"{mark} {it.get('content', '')}", style=style)
+        # plain text glyphs (no checkbox emoji, which some terminals draw as a colored box)
+        mark, style = {"completed": ("✓", f"{MUTED} strike"), "in_progress": ("●", f"bold {ROSE}")}.get(st, ("○", ""))
+        t.append(f"{mark} ", style=MUTED if st == "completed" else style)   # the tick itself is not struck through
+        t.append(it.get("content", ""), style=style)
         if i < len(todos) - 1:
             t.append("\n")
     done = sum(1 for x in todos if x.get("status") == "completed")

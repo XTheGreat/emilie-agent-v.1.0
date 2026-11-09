@@ -5,7 +5,9 @@ from pathlib import Path
 from .i18n import t as tr_, N_
 
 READONLY_TOOLS = {"read_file", "grep", "glob", "todo_write", "use_skill", "web_search", "task", "tasks",   # task(s) = read-only sub-agents
-                  "bg_output", "bg_stop"}                  # only touch background tasks Emilie itself started
+                  "bg_output", "bg_stop",                  # only touch background tasks Emilie itself started
+                  "docx_read", "xlsx_read", "pptx_read"}   # Office readers never change anything
+WRITE_TOOLS = {"write_file", "edit_file", "notebook_edit", "docx_edit", "docx_create", "xlsx_write"}   # change files, same rules
 MODES = ("ask", "trust", "plan")
 
 READONLY_CMDS = {
@@ -243,7 +245,17 @@ class Policy:
             if ro or self.trusted or name in self.always:
                 return "allow", ""
             return "ask", ""
-        if name in {"write_file", "edit_file"}:
+        if name == "notebook_run":                      # runs the notebook's code with the user's Python: like a shell command
+            if plan:
+                return "deny", tr_('plan mode: commands that run code are not allowed')
+            if self.trusted or name in self.always:
+                return "allow", ""
+            return "ask", ""
+        if name == "notebook_edit":                     # listing or reading cells changes nothing
+            ops = args.get("edits") or [args]
+            if all(isinstance(o, dict) and o.get("action") in ("list", "get") for o in ops):
+                return "allow", ""
+        if name in WRITE_TOOLS:
             if plan:
                 return "deny", tr_('plan mode: files cannot be changed')
             path = args.get("path", "")

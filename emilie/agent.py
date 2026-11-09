@@ -16,7 +16,7 @@ from . import claude, clip, context, hooks, session, skills, tools, ui
 from . import companion, language, persona, voice
 from .config import API_KEY, BASE_URL, MODEL, PROVIDER, PROVIDER_ID, VISION_MODEL
 from .effort import Effort, load_settings
-from .policy import Policy
+from .policy import Policy, WRITE_TOOLS
 from .stream import StreamView, is_quota_error
 from .theme import ERR, MUTED, ROSE, WARN
 
@@ -35,6 +35,8 @@ Working rules:
   Prefer these over driving a browser when you only need to read information.
 - For wide searches ("where is X handled", "survey this codebase", multi-page web research) delegate to the task tool:
   a read-only sub-agent investigates in its own context and returns a short report. Do small lookups yourself.
+- Jupyter notebooks: change cells with notebook_edit and run them with notebook_run; never edit the .ipynb JSON by hand.
+  Word, Excel, PowerPoint: docx_read / docx_edit / docx_create, xlsx_read / xlsx_write, pptx_read (not a python script).
 - A <file> block is a file the user @-mentioned."""
 
 COMPACT_SYSTEM = ("You summarize a coding conversation so it can continue without losing context. "
@@ -267,7 +269,7 @@ class Agent:
         return "Not in plan mode: nothing to approve. Just continue with the work."
 
     # ------------------------------------------------------------ subagent
-    SUB_TOOLS = ("read_file", "grep", "glob", "web_search", "web_fetch")
+    SUB_TOOLS = ("read_file", "grep", "glob", "web_search", "web_fetch", "docx_read", "xlsx_read", "pptx_read")
     SUB_ROUNDS = 12
     SUB_SYSTEM = ("You are a research sub-agent working for another agent. Working directory: {cwd}\n{platform}\n"
                   "You can only read: read_file, grep, glob, web_search, web_fetch. You cannot change anything.\n"
@@ -313,7 +315,7 @@ class Agent:
                 return f"ERROR: tool '{name}' is not available to a sub-agent"
             ui.tool_header(self.console, name, args)
             try:
-                return tools.TOOLS[name][0](**args)
+                return tools.invoke(name, args)
             except Exception as e:
                 return f"ERROR: {e}"
 
@@ -649,14 +651,16 @@ class Agent:
             return f"BLOCKED by a hook: {why}. Do not repeat it; continue or ask the user."
         ui.tool_header(self.console, name, args)
         preview = None if asked else ui.make_preview(name, args)
-        if name in {"write_file", "edit_file"}:
+        if name in WRITE_TOOLS or name == "notebook_run":
             self._checkpoint(args.get("path", ""))
+            if name == "notebook_run" and args.get("output_path"):
+                self._checkpoint(args["output_path"])
         t_tool = time.time()
         tui = getattr(self.console, "tui", None)
         if tui is not None:
             tui.mark_running(True)               # the tool line bullet blinks while it runs
         try:
-            out = tools.TOOLS[name][0](**args)
+            out = tools.invoke(name, args)
         except Exception as e:  # send the error to the model, do not crash
             out = f"ERROR: {e}"
         finally:

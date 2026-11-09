@@ -95,7 +95,8 @@ def _read_notebook(p: Path) -> str:
             txt = "".join(txt) if isinstance(txt, list) else str(txt)
             if txt.strip():
                 out.append(f"[output]\n{txt.strip()[:1500]}")
-    return _clip("\n\n".join(out)) or "(empty notebook)"
+    note = "\n\n[cells are numbered from 1; change them with notebook_edit and run them with notebook_run, not edit_file]"
+    return (_clip("\n\n".join(out)) or "(empty notebook)") + note
 
 
 def read_file(path: str, offset: int = 1, limit: int = 0, pages: str = "") -> str:
@@ -105,6 +106,11 @@ def read_file(path: str, offset: int = 1, limit: int = 0, pages: str = "") -> st
         return _read_pdf(p, pages)
     if ext == ".ipynb":
         return _read_notebook(p)
+    if ext in (".docx", ".xlsx", ".xlsm", ".pptx"):         # zip packages: reading them as text would return binary noise
+        from . import office_docx, office_xlsx
+        if ext == ".docx":
+            return office_docx.docx_read(path, offset, limit)
+        return office_xlsx.pptx_read(path) if ext == ".pptx" else office_xlsx.xlsx_read(path)
     if ext in IMAGE_EXTS:
         if not p.is_file():
             return f"ERROR: {p} not found"
@@ -227,13 +233,52 @@ def glob(pattern: str, path: str = ".") -> str:
 
 # ------------------------------------------------------------------ shell
 IS_WIN = os.name == "nt"
-PLATFORM_NOTE = ("OS: Windows. The bash tool runs commands in PowerShell (use PowerShell/Windows syntax and backslash or "
-                 "forward-slash paths, not Linux-only tools)." if IS_WIN else "")
+PLATFORM_NOTE = ("OS: Windows. The bash tool runs commands in PowerShell, NOT bash: use PowerShell syntax. "
+                 "Chain with ';' (a '&&' is translated for you, '||' is not available); there is no tail/head/grep/wc/cat -n/sed/awk "
+                 "(use Select-Object -Last/-First N, Select-String, Measure-Object, Get-Content); do not append '2>&1 | ...' to "
+                 "native programs; paths may use '/' or a backslash. For a long install or build pass timeout=<seconds> (up to 900) "
+                 "or use bash_bg; for another folder pass cwd=<dir> instead of 'cd x && ...'." if IS_WIN else "")
+
+
+def _split_and(command: str) -> list[str]:
+    """Split on a top-level '&&' (outside quotes). Used to make bash-style chains work in Windows PowerShell 5.1."""
+    parts, cur, q, i = [], [], None, 0
+    while i < len(command):
+        ch = command[i]
+        if q:
+            cur.append(ch)
+            if ch == q:
+                q = None
+        elif ch in "'\"":
+            q = ch
+            cur.append(ch)
+        elif command.startswith("&&", i):
+            parts.append("".join(cur).strip())
+            cur = []
+            i += 1
+        else:
+            cur.append(ch)
+        i += 1
+    parts.append("".join(cur).strip())
+    return parts
+
+
+def _ps_chain(command: str) -> str:
+    """'a && b && c'  ->  'a; if ($?) { b; if ($?) { c } }'  (PowerShell 5.1 has no '&&')."""
+    parts = _split_and(command)
+    if len(parts) < 2 or not all(parts):
+        return command
+    out = parts[-1]
+    for p in reversed(parts[:-1]):
+        out = f"{p}; if ($?) {{ {out} }}"
+    return out
 
 
 def _shell_cmd(command: str) -> list[str]:
     """Windows: PowerShell (pwsh if present), UTF-8 output."""
     exe = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
+    if not shutil.which("pwsh"):
+        command = _ps_chain(command)           # Windows PowerShell 5.1 has no '&&'
     prefix = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $ProgressPreference='SilentlyContinue'; "
     return [exe, "-NoProfile", "-NonInteractive", "-Command", prefix + command]
 
@@ -256,15 +301,25 @@ def _kill_group(proc: subprocess.Popen) -> None:
         pass
 
 
-def bash(command: str) -> str:
+def bash(command: str, timeout: int = 120, cwd: str | None = None) -> str:
     """Run a command; short polling so an interrupt (Ctrl+C) can get in and child processes are stopped too."""
+    try:
+        limit = max(1, min(int(timeout), 900))
+    except (TypeError, ValueError):
+        limit = 120
+    if cwd:
+        cwd = os.path.expanduser(str(cwd))
+        if not os.path.isdir(cwd):
+            return f"ERROR: cwd '{cwd}' is not a directory"
+    else:
+        cwd = None
     if IS_WIN:
         proc = subprocess.Popen(_shell_cmd(command), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+                                stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", cwd=cwd,
                                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
     else:
         proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, start_new_session=True)
+                                text=True, start_new_session=True, cwd=cwd)
     waited = 0.0
     try:
         while True:
@@ -273,9 +328,10 @@ def bash(command: str) -> str:
                 break
             except subprocess.TimeoutExpired:
                 waited += 0.2
-                if waited >= 120:
+                if waited >= limit:
                     _kill_group(proc)
-                    return "ERROR: timeout 120s"
+                    return (f"ERROR: timeout {limit}s - the command was stopped. If it is just slow (network, install, build), "
+                            f"run it again with a larger timeout (max 900) or start it with bash_bg and read bg_output.")
     except BaseException:           # KeyboardInterrupt etc.: do not leave an orphan process
         _kill_group(proc)
         raise
@@ -481,6 +537,27 @@ def todo_write(todos: list) -> str:
 
 
 # ------------------------------------------------------------------ registry
+def invoke(name: str, args: dict) -> str:
+    """Call a tool with the model's arguments. Models trained on other agents often add arguments we do not have
+    (description, run_in_background, path ...): drop them and say so instead of failing the whole call."""
+    import inspect
+    fn = TOOLS[name][0]
+    args = dict(args or {})
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return fn(**args)
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return fn(**args)
+    extra = [k for k in args if k not in params]
+    for k in extra:
+        args.pop(k)
+    out = fn(**args)
+    if extra:
+        out = f"NOTE: ignored unknown argument(s): {', '.join(extra)} (this tool accepts: {', '.join(params)}).\n{out}"
+    return out
+
+
 def _schema(name, desc, props, required):
     return {"name": name, "description": desc,
             "input_schema": {"type": "object", "properties": props, "required": required}}
@@ -500,7 +577,8 @@ TOOLS = {
     "read_file": (read_file, _schema(
         "read_file", "Read a file; output is line-numbered as 'number<TAB>content' (do not include the numbers when editing). "
                      "Use offset/limit for large files. Also reads PDFs (text; use pages like '1-5', default first 20), "
-                     "Jupyter notebooks (.ipynb) and images (png/jpg/gif/webp/bmp: the picture is attached so you can see it).",
+                     "Jupyter notebooks (.ipynb), Word/Excel/PowerPoint files (.docx/.xlsx/.pptx, as text) and images "
+                     "(png/jpg/gif/webp/bmp: the picture is attached so you can see it).",
         {"path": _s, "offset": _i, "limit": _i, "pages": _s}, ["path"]), "file", False),
     "write_file": (write_file, _schema(
         "write_file", "Write/overwrite a file. With append=true the content is added to the END of the file instead: "
@@ -520,7 +598,11 @@ TOOLS = {
              "search", False),
     "glob": (glob, _schema("glob", "Find files by glob pattern, e.g. **/*.py", {"pattern": _s, "path": _s},
                            ["pattern"]), "search", False),
-    "bash": (bash, _schema("bash", "Run a shell command", {"command": _s}, ["command"]), "shell", True),
+    "bash": (bash, _schema(
+        "bash", "Run a shell command (PowerShell on Windows, sh elsewhere). Optional: timeout in seconds (default 120, max 900) "
+                "for slow installs/builds, cwd to run in another folder. Anything that may run for minutes or never ends "
+                "(dev server, watcher) belongs in bash_bg.",
+        {"command": _s, "timeout": _i, "cwd": _s}, ["command"]), "shell", True),
     "bash_bg": (bash_bg, _schema(
         "bash_bg", "Run a long-running command in the BACKGROUND (dev server, file watcher, slow build/test) and "
                    "return immediately with a task id. Use plain bash for anything that finishes quickly.",
@@ -597,6 +679,12 @@ def shorten(names: list[str]) -> list[str]:
         else:
             out.append(n)
     return out + [f"{s} ({k})" for s, k in servers.items()]
+
+
+from . import office_docx, office_nb, office_xlsx  # noqa: E402  (notebook, Word, Excel, PowerPoint tools)
+TOOLS.update(office_nb.specs(_schema, _s, _i))
+TOOLS.update(office_docx.specs(_schema, _s, _i))
+TOOLS.update(office_xlsx.specs(_schema, _s, _i))
 
 
 def groups() -> dict[str, list[str]]:
