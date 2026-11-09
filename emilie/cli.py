@@ -375,6 +375,21 @@ def make_core(console: Console, argv: list[str], hooks) -> Core:
                     console.print(tr_('[{MUTED}]mode →[/] {0}', tr_(MODE_LABEL[new]), MUTED=MUTED))
                 else:
                     console.print(tr_('[{MUTED}]current mode:[/] {0}  [{MUTED}](/mode ask|trust|plan)[/]', tr_(MODE_LABEL[policy.mode]), MUTED=MUTED))
+            elif cmd in ("/allow", "/deny"):
+                kind = "allow" if cmd == "/allow" else "deny"
+                perms = eff.load_settings().get("permissions")
+                perms = perms if isinstance(perms, dict) else {}
+                rules = [r for r in perms.get(kind, []) if isinstance(r, str)]
+                rm = arg.startswith("rm ")
+                rule = (arg[3:] if rm else arg).strip()
+                if not rule:
+                    console.print(tr_('[{MUTED}]{kind} rules:[/] {0}', ", ".join(rules) or "-", MUTED=MUTED, kind=kind))
+                    console.print(tr_('[{MUTED}]{cmd} <rule> adds one, {cmd} rm <rule> removes it. e.g. mcp__browser__*  ·  bash(git *)  ·  web_fetch[/]', MUTED=MUTED, cmd=cmd))
+                else:
+                    rules = [r for r in rules if r != rule] + ([] if rm else [rule])
+                    perms[kind] = rules
+                    eff.save_settings(permissions=perms)
+                    console.print(tr_('[{MUTED}]{kind} rules (saved):[/] {0}', ", ".join(rules) or "-", MUTED=MUTED, kind=kind))
             elif cmd == "/undo":
                 done = agent.undo()
                 if done is None:
@@ -382,6 +397,49 @@ def make_core(console: Console, argv: list[str], hooks) -> Core:
                 else:
                     console.print(f"[{OK}]restored:[/] " + ", ".join(os.path.relpath(p) for p in done)
                                   + tr_('  [{MUTED}](changes made through bash are not undone)[/]', MUTED=MUTED))
+            elif cmd == "/thinking":
+                from . import claude as _claude
+                cur = int(eff.load_settings().get("thinking") or 0)
+                if PROVIDER != "anthropic":
+                    console.print(tr_('[{MUTED}]extended thinking is a Claude feature: it needs the Anthropic provider (emilie --setup)[/]', MUTED=MUTED))
+                elif not arg:
+                    console.print(tr_('[{MUTED}]thinking:[/] {0}  [{MUTED}](/thinking on | off | <tokens, min {1}>)[/]',
+                                      f"{cur} tokens" if cur else "off", _claude.MIN_THINKING, MUTED=MUTED))
+                else:
+                    val = {"off": 0, "on": 4000}.get(arg.lower(), int(arg) if arg.isdigit() else None)
+                    if val is None or (val and val < _claude.MIN_THINKING):
+                        console.print(tr_('[{ERR}]usage: /thinking on | off | <tokens, at least {0}>[/]', _claude.MIN_THINKING, ERR=ERR))
+                    else:
+                        eff.save_settings(thinking=val)
+                        console.print(tr_('[{MUTED}]thinking →[/] {0} [{MUTED}](saved; costs extra output tokens)[/]',
+                                          f"{val} tokens" if val else "off", MUTED=MUTED))
+            elif cmd == "/rewind":
+                parts = arg.split()
+                cps = agent.checkpoints
+                if not parts:
+                    if not cps:
+                        console.print(tr_('[{MUTED}]nothing to rewind yet: only turns that changed files are listed[/]', MUTED=MUTED))
+                    for n in range(1, len(cps) + 1):
+                        ck = cps[-n]
+                        files = ", ".join(os.path.relpath(p) for p in list(ck)[:3]) + (" …" if len(ck) > 3 else "")
+                        console.print(f"[{ROSE}]{n}[/]  {ck.label or '?'}  [{MUTED}]· {files}{'' if ck.mark is not None else ' · files only'}[/]")
+                    if cps:
+                        console.print(tr_('[{MUTED}]/rewind <n> [both|files|chat]  →  go back to just before that turn (1 = the latest)[/]', MUTED=MUTED))
+                elif not parts[0].isdigit():
+                    console.print(tr_('[{ERR}]usage: /rewind <n> [both|files|chat][/]', ERR=ERR))
+                else:
+                    what = parts[1] if len(parts) > 1 else "both"
+                    if what not in ("both", "files", "chat"):
+                        console.print(tr_('[{ERR}]usage: /rewind <n> [both|files|chat][/]', ERR=ERR))
+                    else:
+                        res = agent.rewind(int(parts[0]), files=what != "chat", chat=what != "files")
+                        if isinstance(res, str):
+                            console.print(f"[{ERR}]{res}[/]")
+                        else:
+                            restored, removed = res
+                            console.print(f"[{OK}]rewound[/] " + (f"files: {', '.join(os.path.relpath(p) for p in restored)}  " if restored else "")
+                                          + (f"· {removed} messages removed" if removed else "")
+                                          + tr_('  [{MUTED}](changes made through bash are not undone)[/]', MUTED=MUTED))
             elif cmd == "/todos":
                 ui.print_todos(console, agent.todos) if agent.todos else console.print(tr_('[{MUTED}]no todos yet[/]', MUTED=MUTED))
             elif cmd == "/resume":
@@ -753,6 +811,65 @@ def main_classic(argv: list[str]) -> None:
             return
 
 
+# ======================================================================= print mode (emilie -p)
+def _final_text(messages: list[dict]) -> str:
+    """The text of the last assistant message (Anthropic blocks or OpenAI string)."""
+    for m in reversed(messages):
+        if m.get("role") != "assistant":
+            continue
+        c = m.get("content")
+        if isinstance(c, str):
+            if c.strip():
+                return c
+        elif isinstance(c, list):
+            t = "".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
+            if t.strip():
+                return t
+    return ""
+
+
+def _print_prompt(argv: list[str]) -> str | None:
+    """Prompt for `emilie -p "..."`: the text after -p/--print, plus anything piped on stdin."""
+    i = next((k for k, a in enumerate(argv) if a in ("-p", "--print")), None)
+    if i is None:
+        return None
+    text = argv[i + 1] if i + 1 < len(argv) and not argv[i + 1].startswith("-") else ""
+    if not sys.stdin.isatty():
+        piped = sys.stdin.read()
+        text = (text + "\n\n" + piped).strip() if text else piped.strip()
+    return text
+
+
+def main_print(argv: list[str], prompt: str) -> int:
+    """Non-interactive: run ONE turn, print only the final answer on stdout (progress goes to stderr).
+    Nobody can answer a permission question, so anything that would ask is denied, unless --trust (or an /allow rule)
+    covers it. Exit code: 0 ok, 1 error, 2 a tool call was denied and the task may be incomplete."""
+    if trust.needed(argv):
+        print(tr_("print mode cannot ask whether to trust this folder. Run emilie once here to trust it, or pass "
+                  "--trust-folder."), file=sys.stderr)
+        return 1
+    console = Console(file=sys.stderr, force_terminal=False, highlight=False)
+    denied: list[str] = []
+
+    def no_prompt(_console, name, args, reason):
+        denied.append(name)
+        print(f"[print mode] denied {name}: nobody to ask. Use --trust or /allow rules to permit it.", file=sys.stderr)
+        return "n"
+
+    ui.ask_permission = no_prompt
+    core = make_core(console, argv, _ClassicHooks())
+    try:
+        core.agent.run_turn(prompt, [])
+    except KeyboardInterrupt:
+        return 130
+    except BaseException as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    out = _final_text(core.agent.messages)
+    sys.stdout.write(out if out.endswith("\n") else out + "\n")
+    return 2 if denied else 0
+
+
 # ======================================================================= entri
 def main() -> None:
     argv = sys.argv[1:]
@@ -784,6 +901,13 @@ def main() -> None:
             os.execv(sys.executable, [sys.executable, "-m", "emilie.cli", *argv])
         print(tr_('No API key. Run: emilie --setup'), file=sys.stderr)
         sys.exit(1)
+    prompt = _print_prompt(argv)
+    if prompt is not None:                       # emilie -p "question"  /  type file | emilie -p "summarise"
+        if not prompt:
+            print(tr_('Usage: emilie -p "your prompt"   (or pipe text in)  [--trust] [--plan] [--trust-folder]'),
+                  file=sys.stderr)
+            sys.exit(1)
+        sys.exit(main_print(argv, prompt))
     if "--banner" in argv:
         console = Console()
         hooks = _ClassicHooks()

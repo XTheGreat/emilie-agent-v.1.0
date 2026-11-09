@@ -55,6 +55,10 @@ COMMANDS = {
     "/compact": N_('compact history to save tokens'), "/cost": N_('token usage of this session'),
     "/context": N_('context size vs the effort limit'), "/mode": N_('switch permission mode (ask/trust/plan)'),
     "/plan": N_('toggle plan mode (read-only)'), "/trust": N_('toggle trusting this folder'),
+    "/allow": N_('always allow a tool without asking: /allow mcp__browser__* | bash(git *) | rm <rule>'),
+    "/deny": N_('always block a tool: /deny bash(rm *) | rm <rule>'),
+    "/thinking": N_('Claude extended thinking: /thinking on | off | <tokens> (Anthropic provider only)'),
+    "/rewind": N_('go back to before an earlier turn that changed files: /rewind, /rewind <n> [both|files|chat]'),
     "/undo": N_('undo the file changes of the last turn'), "/todos": N_("the agent's task list"),
     "/resume": N_('resume an older session'), "/init": N_('create EMILIE.md for this project'),
     "/memory": N_('loaded memory files'), "/logo": N_('show the banner / change the logo (video/image)'),
@@ -150,11 +154,11 @@ class InputBox:
         self.pastes: dict[int, str] = {}
         self.images: dict[int, tuple[str, str]] = {}
         self.image_meta: dict[int, tuple[tuple[int, int], int]] = {}
+        self.image_paths: dict[int, str | None] = {}
         self._nt = self._ni = 0
 
         # ---- animated logo (video / image) ----
         self.t0 = time.monotonic()
-        self.image_paths: dict[int, str | None] = {}
         self.big = self.mini = None
         self.logo_error: str | None = None
         self.load_logo()
@@ -356,11 +360,11 @@ class InputBox:
         self._ni += 1
         self.images[self._ni] = enc
         self.image_meta[self._ni] = (size, len(data))
+        self.image_paths[self._ni] = clip.save_image(data)
         buf.insert_text(f"[Image #{self._ni}] ")
 
     def _on_paste(self, buf, text: str) -> None:
         text = text.replace("\r\n", "\n").replace("\r", "\n")
-        self.image_paths[self._ni] = clip.save_image(data)
         paths = clip.parse_image_paths(text)
         if paths:
             for p in paths:
