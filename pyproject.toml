@@ -1,0 +1,19 @@
+[project]
+name = "emilie-agent"
+version = "0.1.0"
+description = "Terminal coding agent with an animated Emilie banner"
+requires-python = ">=3.10"
+dependencies = ["anthropic", "openai", "rich", "pillow", "prompt_toolkit", "numpy", "av"]
+
+[project.scripts]
+emilie = "emilie.cli:main"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["emilie"]
+
+[tool.setuptools.package-data]
+emilie = ["locales/*.json"]

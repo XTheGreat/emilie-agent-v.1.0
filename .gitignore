@@ -1,0 +1,6 @@
+.env
+.venv/
+__pycache__/
+*.egg-info/
+assets/dafa.mp4
+assets/fadljfhakf.png
