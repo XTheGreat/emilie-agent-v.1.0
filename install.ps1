@@ -38,13 +38,13 @@ if ((Resolve-Path $root).Path -ne (Resolve-Path $src -ErrorAction SilentlyContin
     Get-ChildItem -Force $root | Where-Object { $_.Name -notin @(".git", ".venv", "__pycache__", ".env") } |
         Copy-Item -Recurse -Force -Destination $src
 }
-# a normal (not editable) install: $src is already a private copy, and an editable install only adds setuptools notices
+# editable install of the private copy: the code reads assets\ (logo) next to the package folder, so it must run from $src
 Write-Host "Installing Emilie and its dependencies (first time takes a minute)..."
-& $vpy -m pip install --upgrade --disable-pip-version-check -q $src
-if ($LASTEXITCODE -ne 0) { Write-Host "pip install failed" -ForegroundColor Red; exit 1 }
-# same version number as before: make sure the NEW code replaces the old one
-& $vpy -m pip install --force-reinstall --no-deps --disable-pip-version-check -q $src
-if ($LASTEXITCODE -ne 0) { Write-Host "pip install failed" -ForegroundColor Red; exit 1 }
+$env:PYTHONWARNINGS = "ignore"     # setuptools prints a long notice for every editable install; it does not apply here
+& $vpy -m pip install --upgrade --disable-pip-version-check -q -e $src
+$pip_status = $LASTEXITCODE
+Remove-Item Env:PYTHONWARNINGS -ErrorAction SilentlyContinue
+if ($pip_status -ne 0) { Write-Host "pip install failed" -ForegroundColor Red; exit 1 }
 
 # launcher: emilie.cmd -> venv\Scripts\emilie.exe
 Set-Content -Path (Join-Path $bin "emilie.cmd") -Encoding ASCII -Value "@echo off`r`n`"$venv\Scripts\emilie.exe`" %*"
