@@ -203,7 +203,8 @@ class Water:
 class Sprite:
     """One logo view `cols` cells wide (the height follows the source aspect ratio)."""
 
-    def __init__(self, src: Source, cols: int, gfx: bool = False):
+    def __init__(self, src: Source, cols: int, gfx: bool = False, cap_px: int | None = None):
+        self.req_w = cols                                 # the width that was asked for (Sixel may shrink the real one)
         h = max(2, round(cols * src.aspect))
         self.w, self.h = cols, h + h % 2
         self.src = src
@@ -216,10 +217,11 @@ class Sprite:
                 if gfx == "sixel":                            # real pixels via Sixel: the picture must match the cell area exactly
                     from . import sixel as _gfx
                     cw, ch = _gfx.cell_px()
-                    self.w = min(self.w, max(12, _gfx.MAX_PX // cw))
+                    cap = cap_px or _gfx.MAX_PX                   # a size the user chose may go beyond the auto limit
+                    self.w = min(self.w, max(12, cap // cw))
                     self.h = max(2, round(self.w * src.aspect))
                     self.h += self.h % 2
-                    while (self.h // 2) * ch > _gfx.MAX_PX and self.w > 12:
+                    while (self.h // 2) * ch > cap and self.w > 12:
                         self.w -= 1
                         self.h = max(2, round(self.w * src.aspect))
                         self.h += self.h % 2

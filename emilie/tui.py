@@ -408,7 +408,8 @@ class TUI:
                 src = logo.Source(sp, hd) if sp else logo.Source(p, hd).make_still()
             else:
                 src = logo.Source(p, hd)
-            self.sprite = logo.Sprite(src, cols, gfx="sixel" if use_sx else hd)
+            cap = int(paths.env("SIXEL_MAX_PX", "") or 480) if fixed else None      # Alt +/- may go bigger than the auto limit
+            self.sprite = logo.Sprite(src, cols, gfx="sixel" if use_sx else hd, cap_px=cap)
             self.sprite.ascii = self.ascii
         except Exception as e:
             self.logo_error = f"{type(e).__name__}: {e}"
@@ -440,7 +441,7 @@ class TUI:
         save_settings(logo_still=self.still, logo_ascii=self.ascii, logo_sixel=self.sixel)
         self._reload_logo_keep_time()
         return {"still": tr_('logo -> still image (low CPU)'), "ascii": tr_('logo -> ASCII video'),
-                "sixel": tr_('logo -> real video (Sixel)'), "video": tr_('logo -> video')}[mode]
+                "sixel": tr_('logo -> real video (Sixel) - Alt+= / Alt+- change the size (bigger = slower)'), "video": tr_('logo -> video')}[mode]
 
     def set_still(self, still: bool) -> str:
         return self._set_mode("still" if still else "video")
@@ -713,7 +714,7 @@ class TUI:
         """Banner = video logo + info + ASCII art. Scrolls together with the conversation."""
         t = self._t()
         cols, rows = self._cols_rows()
-        if self.sprite and self._logo_auto and abs(self._auto_logo_cols(rows) - self.sprite.w) >= 4:
+        if self.sprite and self._logo_auto and abs(self._auto_logo_cols(rows) - getattr(self.sprite, "req_w", self.sprite.w)) >= 4:
             old_t0 = self.sprite.t0
             self.load_logo()                     # the window was resized -> the logo adapts
             if self.sprite:
@@ -911,7 +912,9 @@ class TUI:
             return
         view.hidden = not shown
         self._banner_cache = None
-        if not shown and self.app is not None:
+        # Scrolling slowly: the logo cells turn into half-blocks and paint over the picture by themselves. Only a big jump
+        # (the banner left the screen at once) needs the screen wiped; wiping every time made the screen flash.
+        if not shown and self._top_line() >= self._banner_rows and self.app is not None:
             app = self.app
 
             def wipe():
@@ -1677,6 +1680,12 @@ class TUI:
                 self.sprite.t0 = t0 if t0 is not None else -100.0
             self._banner_cache = None
             self._invalidate()
+            if self.sprite and getattr(self.sprite.view, "esc", None) is not None:    # Sixel: tell the user what happened
+                w = self.sprite.w
+                if w < n:
+                    self.flash(tr_('Sixel logo: {0} cols is the biggest allowed (bigger = slower). Raise with EMILIE_SIXEL_MAX_PX', w), 5)
+                else:
+                    self.flash(tr_('Sixel logo: {0} cols (bigger = slower, Alt+- to shrink)', w), 3)
 
         @kb.add("escape", "=", filter=free)
         @kb.add("escape", "+", filter=free)
