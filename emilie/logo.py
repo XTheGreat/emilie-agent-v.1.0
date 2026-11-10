@@ -212,12 +212,25 @@ class Sprite:
         self._mask_cache: tuple | None = None
         if gfx:
             try:
-                from . import gfx as _gfx
-                cw, ch = _gfx.cell_px()
-                pw, ph = self.w * cw, (self.h // 2) * ch
-                k = min(1.0, _gfx.MAX_PX / max(pw, ph), src.raw.shape[2] / pw, src.raw.shape[1] / ph)
-                self.px = (max(8, int(pw * k)), max(8, int(ph * k)))
-                self.view = _gfx.View(self.w, self.h // 2)
+                if gfx == "sixel":                            # real pixels via Sixel: the picture must match the cell area exactly
+                    from . import sixel as _gfx
+                    cw, ch = _gfx.cell_px()
+                    self.w = min(self.w, max(12, _gfx.MAX_PX // cw))
+                    self.h = max(2, round(self.w * src.aspect))
+                    self.h += self.h % 2
+                    while (self.h // 2) * ch > _gfx.MAX_PX and self.w > 12:
+                        self.w -= 1
+                        self.h = max(2, round(self.w * src.aspect))
+                        self.h += self.h % 2
+                    self.px = (self.w * cw, (self.h // 2) * ch)
+                    self.view = _gfx.View(self.w, self.h // 2)
+                else:
+                    from . import gfx as _gfx
+                    cw, ch = _gfx.cell_px()
+                    pw, ph = self.w * cw, (self.h // 2) * ch
+                    k = min(1.0, _gfx.MAX_PX / max(pw, ph), src.raw.shape[2] / pw, src.raw.shape[1] / ph)
+                    self.px = (max(8, int(pw * k)), max(8, int(ph * k)))
+                    self.view = _gfx.View(self.w, self.h // 2)
             except Exception:
                 self.view = None
         self.water = Water(self.w, self.h)

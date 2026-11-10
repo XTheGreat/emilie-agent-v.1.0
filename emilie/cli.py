@@ -541,6 +541,8 @@ def make_core(console: Console, argv: list[str], hooks) -> Core:
                         console.print(tr_('[{MUTED}]{0} (saved)[/]', hooks.set_fps(int(n)), MUTED=MUTED))
                     else:
                         console.print(tr_('[{MUTED}]/logo fps <4-60>   (Alt+F cycles 8 / 12 / 18 / 24 / 30)[/]', MUTED=MUTED))
+                elif arg == "sixel":
+                    console.print(tr_('[{MUTED}]{0} (saved)[/]', hooks.set_sixel(True), MUTED=MUTED))
                 elif arg == "ascii":
                     console.print(tr_('[{MUTED}]{0} (saved)[/]', hooks.set_ascii(True), MUTED=MUTED))
                 elif arg in ("still", "video"):
@@ -745,6 +747,9 @@ class _ClassicHooks:
         return tr_('still/video applies to the full-screen UI only')
 
     def set_ascii(self, on):
+        return tr_('still/video applies to the full-screen UI only')
+
+    def set_sixel(self, on):
         return tr_('still/video applies to the full-screen UI only')
 
     def refresh_language(self):

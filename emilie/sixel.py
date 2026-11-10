@@ -14,13 +14,19 @@ from PIL import Image
 ESC = "\x1b"
 
 
-def encode(rgb: np.ndarray, colors: int = 48) -> str:
-    """uint8 HxWx3 -> a complete Sixel string (DCS ... ST). Palette is quantised per frame (no dithering = no shimmer)."""
+def encode(rgb: np.ndarray, colors: int = 48, mask: np.ndarray | None = None) -> str:
+    """uint8 HxWx3 -> a complete Sixel string (DCS ... ST). Palette is quantised per frame (no dithering = no shimmer).
+    mask (bool HxW, True = draw): pixels outside it stay transparent (the terminal's own background shows through)."""
     h, w = rgb.shape[:2]
+    if mask is not None and mask.any() and not mask.all():
+        rgb = rgb.copy()
+        rgb[~mask] = rgb[mask].mean(axis=0).astype(np.uint8)       # hidden pixels must not use up palette entries
     q = Image.fromarray(rgb).quantize(colors=colors, method=Image.Quantize.FASTOCTREE, dither=Image.Dither.NONE)
-    idx = np.asarray(q, dtype=np.uint8)
+    idx = np.asarray(q, dtype=np.uint8).copy()
+    if mask is not None:
+        idx[~mask] = 255
     pal = np.asarray(q.getpalette()[:colors * 3], dtype=np.uint8).reshape(-1, 3)
-    out = [f'{ESC}Pq"1;1;{w};{h}']
+    out = [f'{ESC}P0;1;q"1;1;{w};{h}']                      # P2=1: untouched pixels stay transparent
     for i, (r, g, b) in enumerate(pal):                       # palette: percentages 0..100
         out.append(f"#{i};2;{int(r) * 100 // 255};{int(g) * 100 // 255};{int(b) * 100 // 255}")
     pad = (-h) % 6
@@ -65,14 +71,71 @@ def supported() -> bool:
     return force in ("1", "on", "yes", "true") or bool(os.environ.get("WT_SESSION") or os.environ.get("WEZTERM_EXECUTABLE"))
 
 
-def cell_px() -> tuple[int, int]:
-    """Cell size in pixels; Windows Terminal does not report it, so assume the usual 10x20 (override: EMILIE_CELL=WxH)."""
-    v = os.environ.get("EMILIE_CELL", "")
+MAX_PX = int(os.environ.get("EMILIE_SIXEL_PX", "") or 220)   # longest side of the picture: Sixel cannot be scaled, so this also caps the logo size
+_cell: tuple[int, int] | None = None
+
+
+def init_cell_px() -> None:
+    """Ask the terminal for its cell size (CSI 16 t -> CSI 6;h;w t). Must run BEFORE the full-screen UI owns stdin.
+    EMILIE_CELL=WxH overrides; if the terminal stays silent we assume 10x20."""
+    global _cell
     try:
-        w, h = v.lower().split("x")
-        return int(w), int(h)
+        w, h = os.environ.get("EMILIE_CELL", "").lower().split("x")
+        _cell = (int(w), int(h))
+        return
     except ValueError:
-        return 10, 20
+        pass
+    _cell = (10, 20)
+    if os.name != "nt" or not sys.stdin.isatty():
+        return
+    try:
+        import msvcrt
+        sys.stdout.write(f"{ESC}[16t")
+        sys.stdout.flush()
+        buf, end = "", time.monotonic() + 0.4
+        while time.monotonic() < end and not buf.endswith("t"):
+            if msvcrt.kbhit():
+                buf += msvcrt.getwch()
+            else:
+                time.sleep(0.005)
+        if buf.endswith("t") and buf.startswith(f"{ESC}[6;"):
+            hh, ww = buf[4:-1].split(";")[:2]
+            if int(ww) >= 4 and int(hh) >= 8:
+                _cell = (int(ww), int(hh))
+    except Exception:
+        pass
+
+
+def cell_px() -> tuple[int, int]:
+    return _cell or (10, 20)
+
+
+class View:
+    """Same shape as gfx.View (cols, rows, cells, send, style) so Sprite.render_hd drives it unchanged.
+    The picture is NOT in the text grid: carrier() returns the escape that pt writes once per new frame."""
+    COLORS = 48
+
+    def __init__(self, cols: int, rows: int):
+        self.cols, self.rows = cols, rows
+        self.cells = [" " * cols for _ in range(rows)]
+        self.esc = ""
+        self.n = 0
+
+    def send(self, rgba: np.ndarray) -> None:
+        self.esc = encode(np.ascontiguousarray(rgba[..., :3]), self.COLORS, rgba[..., 3] > 127)
+        self.n += 1
+
+    def style(self) -> str:
+        return ""
+
+    def carrier(self) -> list[tuple[str, str]]:
+        """Goes in ONE cell just after the last logo row (outside the picture). Its colour is the frame number, so every new
+        frame (and only a new frame) makes prompt_toolkit redraw that cell, and it emits the escape then: save cursor, jump to the logo's top-left cell,
+        draw the picture, restore the cursor."""
+        if not self.esc:
+            return [("", " ")]
+        jump = (f"{ESC}[{self.rows - 1}A" if self.rows > 1 else "") + f"{ESC}[{self.cols}D"
+        return [("[ZeroWidthEscape]", f"{ESC}7{jump}{self.esc}{ESC}8"), (f"fg:#{self.n & 0xFFFFFF:06x}", " ")]
 
 
 def _play(frames, src_fps: float, secs: float, fps: float, colors: int) -> float:

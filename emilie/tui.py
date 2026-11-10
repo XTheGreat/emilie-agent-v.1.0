@@ -306,8 +306,12 @@ class TUI:
         self._logo_auto = True
         from .effort import load_settings as _ls
         self.fps = int(_ls().get("fps") or FPS)
-        self.ascii = bool(_ls().get("logo_ascii"))
-        self.still = bool(_ls().get("logo_still")) and not self.ascii
+        self.sixel = bool(_ls().get("logo_sixel"))
+        self.ascii = bool(_ls().get("logo_ascii")) and not self.sixel
+        self.still = bool(_ls().get("logo_still")) and not self.ascii and not self.sixel
+        from . import sixel as _sx
+        if _sx.supported():
+            _sx.init_cell_px()                  # asks the terminal for its cell size: must happen before the UI owns stdin
         self.borders_anim = _ls().get("borders_anim", True) is not False
         self.logo_error: str | None = None
         self.sel: dict | None = None             # text selection: {"a": (row, col), "b": (row, col), "active": bool, "w": width}
@@ -383,7 +387,9 @@ class TUI:
             self._logo_auto = not fixed
             cols = int(fixed or self._auto_logo_cols(rows))
             from . import gfx
-            hd = gfx.supported() and not paths.env("LOGO_LOWRES") and not self.ascii   # ASCII needs the cell grid, not real pixels
+            from . import sixel as _sx
+            use_sx = self.sixel and _sx.supported()
+            hd = gfx.supported() and not paths.env("LOGO_LOWRES") and not self.ascii and not use_sx   # ASCII/Sixel do not use the kitty path
             if logo.needs_decode(p, hd) and not getattr(self, "_announced", False):
                 self._announced = True
                 sys.stdout.write(tr_('\x1b[2m(=^.^=) preparing the logo video (first run only, a few seconds)...\x1b[0m\n'))
@@ -393,7 +399,7 @@ class TUI:
                 src = logo.Source(sp, hd) if sp else logo.Source(p, hd).make_still()
             else:
                 src = logo.Source(p, hd)
-            self.sprite = logo.Sprite(src, cols, gfx=hd)
+            self.sprite = logo.Sprite(src, cols, gfx="sixel" if use_sx else hd)
             self.sprite.ascii = self.ascii
         except Exception as e:
             self.logo_error = f"{type(e).__name__}: {e}"
@@ -418,27 +424,37 @@ class TUI:
         nxt = next((c for c in FPS_CHOICES if c > self.fps), FPS_CHOICES[0])
         return self.set_fps(nxt)
 
-    def set_still(self, still: bool) -> str:
+    def _set_mode(self, mode: str) -> str:
+        """mode: video | still | ascii | sixel (exactly one is on; video = none of the others)."""
         from .effort import save_settings
-        self.still, self.ascii = still, False
-        save_settings(logo_still=still, logo_ascii=False)
+        self.still, self.ascii, self.sixel = mode == "still", mode == "ascii", mode == "sixel"
+        save_settings(logo_still=self.still, logo_ascii=self.ascii, logo_sixel=self.sixel)
         self._reload_logo_keep_time()
-        return tr_('logo -> still image (low CPU)') if still else tr_('logo -> video')
+        return {"still": tr_('logo -> still image (low CPU)'), "ascii": tr_('logo -> ASCII video'),
+                "sixel": tr_('logo -> real video (Sixel)'), "video": tr_('logo -> video')}[mode]
+
+    def set_still(self, still: bool) -> str:
+        return self._set_mode("still" if still else "video")
 
     def set_ascii(self, on: bool) -> str:
-        from .effort import save_settings
-        self.ascii, self.still = on, False
-        save_settings(logo_ascii=on, logo_still=False)
-        self._reload_logo_keep_time()
-        return tr_('logo -> ASCII video') if on else tr_('logo -> video')
+        return self._set_mode("ascii" if on else "video")
+
+    def set_sixel(self, on: bool) -> str:
+        from . import sixel
+        if on and not sixel.supported():
+            return tr_('Sixel video needs Windows Terminal 1.22+ (or set EMILIE_SIXEL=on)')
+        return self._set_mode("sixel" if on else "video")
 
     def cycle_logo_mode(self) -> str:
-        """Alt+I: video -> still -> ASCII -> video."""
+        """Alt+I: video -> still -> ASCII -> real video (Sixel, only where supported) -> video."""
+        from . import sixel
+        if self.sixel:
+            return self._set_mode("video")
         if self.ascii:
-            return self.set_still(False)
+            return self._set_mode("sixel" if sixel.supported() else "video")
         if self.still:
-            return self.set_ascii(True)
-        return self.set_still(True)
+            return self._set_mode("ascii")
+        return self._set_mode("still")
 
     # ================================================================ helpers
     @staticmethod
@@ -700,6 +716,8 @@ class TUI:
             fps = tr_('video @ {0}fps', self.fps) if self.sprite.src.is_video else tr_('still image')
             if self.ascii:
                 fps = "ASCII " + fps
+            if self.sprite.view is not None and getattr(self.sprite.view, "esc", None) is not None:
+                term, fps = "sixel", f"{self.sprite.src.fps:g}fps"
             if self.sprite.view is not None:
                 term, fps = "kitty-gfx HD", (f"{self.sprite.src.fps:g}fps" if self.sprite.src.is_video else fps)
 
@@ -778,10 +796,16 @@ class TUI:
                 left, right = ident + sys_rows + ext_rows + keys + credit, []
             left = fit(left, n)
             right = right[:n]
-            for i, row in enumerate(anim.sprite_rows(self.sprite, t, col0=1)):
+            sprows = anim.sprite_rows(self.sprite, t, col0=1)
+            sxv = self.sprite.view if getattr(self.sprite.view, "esc", None) is not None else None   # Sixel picture, if any
+            for i, row in enumerate(sprows):
                 out.append(("", " "))
                 out += row
-                out.append(("", "   "))
+                if sxv is not None and i == len(sprows) - 1:      # the picture's escape rides on the cell right after the last logo row
+                    out += sxv.carrier()
+                    out.append(("", "  "))
+                else:
+                    out.append(("", "   "))
                 # the left column is filled evenly to follow the logo height (leftover lines are blanked neatly)
                 L = left[i] if i < len(left) else []
                 out += anim._clip(L, colw)
@@ -1856,6 +1880,9 @@ class TuiHooks:
 
     def set_ascii(self, on):
         return self.tui.set_ascii(on)
+
+    def set_sixel(self, on):
+        return self.tui.set_sixel(on)
 
     def set_borders(self, on):
         return self.tui.set_borders(on)
