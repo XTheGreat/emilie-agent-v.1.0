@@ -1,6 +1,6 @@
 """Sixel output (Windows Terminal 1.22+, WezTerm, foot, mlterm...): real pixels on terminals without the kitty protocol.
 
-Standalone on purpose: `python -m emilie.sixel [fps] [seconds]` plays the logo video as real pixels, so you can check
+Standalone on purpose: `python -m emilie.sixel [seconds] [size] [colours]` (or `bench`) plays the logo video as real pixels, so you can check
 that your terminal renders Sixel before anything else depends on it. Nothing else imports this module yet."""
 from __future__ import annotations
 
@@ -75,10 +75,28 @@ def cell_px() -> tuple[int, int]:
         return 10, 20
 
 
+def _play(frames, src_fps: float, secs: float, fps: float, colors: int) -> float:
+    """Play for `secs` seconds, return the fps the terminal actually managed (frames are skipped, never queued)."""
+    t0, shown, last = time.monotonic(), 0, -1
+    while time.monotonic() - t0 < secs:
+        i = int((time.monotonic() - t0) * src_fps) % len(frames)
+        if i != last:
+            sys.stdout.write(f"{ESC}[3;1H" + encode(frames[i], colors))
+            sys.stdout.flush()
+            shown, last = shown + 1, i
+        time.sleep(0.001)
+    return shown / (time.monotonic() - t0)
+
+
 def _demo() -> None:
     from . import logo
-    fps = float(sys.argv[1]) if len(sys.argv) > 1 else 12.0
-    secs = float(sys.argv[2]) if len(sys.argv) > 2 else 15.0
+    a = sys.argv[1:]
+    bench = bool(a) and a[0] == "bench"
+    if bench:
+        a = a[1:]
+    secs = float(a[0]) if a else (3.0 if bench else 15.0)
+    side = int(a[1]) if len(a) > 1 else 192
+    colors = int(a[2]) if len(a) > 2 else 48
     if not supported():
         print("Sixel is not enabled for this terminal. Windows Terminal 1.22+ sets WT_SESSION; "
               "otherwise force it with EMILIE_SIXEL=on (PowerShell: $env:EMILIE_SIXEL='on').")
@@ -88,22 +106,20 @@ def _demo() -> None:
         print("no logo file found")
         return
     src = logo.Source(p)
-    side = 200
-    frames = [np.asarray(Image.fromarray(f).resize((side, int(side * src.aspect)), Image.LANCZOS)) for f in src.raw]
-    sys.stdout.write(f"{ESC}[?1049h{ESC}[?25l{ESC}[2J{ESC}[1;1HSixel demo: {len(frames)} frames, Ctrl+C to quit")
-    t0, shown = time.monotonic(), 0
+    cfgs = [(192, 48), (160, 32), (128, 32), (128, 16), (96, 16)] if bench else [(side, colors)]
+    res = []
+    sys.stdout.write(f"{ESC}[?1049h{ESC}[?25l{ESC}[2J")
     try:
-        while time.monotonic() - t0 < secs:
-            f = frames[int((time.monotonic() - t0) * (src.fps if src.is_video else 1)) % len(frames)]
-            sys.stdout.write(f"{ESC}[3;1H" + encode(f))
-            sys.stdout.flush()
-            shown += 1
-            time.sleep(max(0.0, 1.0 / fps - 0.001))
+        for sd, co in cfgs:
+            frames = [np.asarray(Image.fromarray(f).resize((sd, int(sd * src.aspect)), Image.LANCZOS)) for f in src.raw]
+            sys.stdout.write(f"{ESC}[2J{ESC}[1;1H{sd}px / {co} colours   (Ctrl+C to quit)")
+            res.append((sd, co, _play(frames, src.fps if src.is_video else 1, secs, 0, co)))
     except KeyboardInterrupt:
         pass
     finally:
         sys.stdout.write(f"{ESC}[?25h{ESC}[?1049l")
-        print(f"{shown} frames in {time.monotonic() - t0:.1f}s = {shown / (time.monotonic() - t0):.1f} fps")
+        for sd, co, f in res:
+            print(f"size {sd:>3}px  colours {co:>2}  ->  {f:4.1f} fps")
 
 
 if __name__ == "__main__":
