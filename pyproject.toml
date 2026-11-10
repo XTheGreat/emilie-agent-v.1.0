@@ -12,8 +12,9 @@ emilie = "emilie.cli:main"
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = ["emilie"]
+[tool.setuptools.packages.find]
+include = ["emilie*"]
+namespaces = true      # the skills and locales folders hold data, not code: list them as packages so nothing is dropped
 
 [tool.setuptools.package-data]
 emilie = ["locales/*.json", "builtin/skills/*/SKILL.md", "builtin/skills/*/references/*", "builtin/skills/*/scripts/*",

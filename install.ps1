@@ -26,9 +26,11 @@ if (-not $py) {
 Write-Host "Using Python: $($py -join ' ')"
 
 New-Item -ItemType Directory -Force -Path $home_dir, $bin | Out-Null
-& $py[0] @($py[1..($py.Length - 1)]) -m venv $venv
 $vpy = Join-Path $venv "Scripts\python.exe"
-& $vpy -m pip install --upgrade pip | Out-Null
+if (-not (Test-Path $vpy)) {        # re-running the installer must not rebuild the venv (python.exe is locked while Emilie runs)
+    & $py[0] @($py[1..($py.Length - 1)]) -m venv $venv
+}
+& $vpy -m pip install --upgrade --disable-pip-version-check -q pip | Out-Null
 # keep a private copy of the sources, so deleting the cloned folder later does not break Emilie
 if ((Resolve-Path $root).Path -ne (Resolve-Path $src -ErrorAction SilentlyContinue).Path) {
     if (Test-Path $src) { Remove-Item -Recurse -Force $src }
@@ -36,7 +38,12 @@ if ((Resolve-Path $root).Path -ne (Resolve-Path $src -ErrorAction SilentlyContin
     Get-ChildItem -Force $root | Where-Object { $_.Name -notin @(".git", ".venv", "__pycache__", ".env") } |
         Copy-Item -Recurse -Force -Destination $src
 }
-& $vpy -m pip install --upgrade -e $src
+# a normal (not editable) install: $src is already a private copy, and an editable install only adds setuptools notices
+Write-Host "Installing Emilie and its dependencies (first time takes a minute)..."
+& $vpy -m pip install --upgrade --disable-pip-version-check -q $src
+if ($LASTEXITCODE -ne 0) { Write-Host "pip install failed" -ForegroundColor Red; exit 1 }
+# same version number as before: make sure the NEW code replaces the old one
+& $vpy -m pip install --force-reinstall --no-deps --disable-pip-version-check -q $src
 if ($LASTEXITCODE -ne 0) { Write-Host "pip install failed" -ForegroundColor Red; exit 1 }
 
 # launcher: emilie.cmd -> venv\Scripts\emilie.exe
