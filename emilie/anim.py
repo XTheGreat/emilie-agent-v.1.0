@@ -2,6 +2,7 @@
 All functions return 'fragments' [(style, text[, mouse_handler])] that are redrawn
 every frame (PromptSession(refresh_interval=...)).
 """
+import numpy as np
 from prompt_toolkit.mouse_events import MouseEventType
 
 from .i18n import t as tr_
@@ -43,6 +44,10 @@ def sprite_rows(sprite: Sprite, t: float, col0: int) -> list[list[tuple]]:
     rows = []
     if getattr(sprite, "ascii", False):               # ASCII mode: one character per cell, picked by brightness, tinted with the real colour
         ramp = ASCII_RAMP
+        lum_all = (img.astype(np.float32) @ np.array([0.299, 0.587, 0.114], np.float32)) / 255
+        seen = lum_all[vis]
+        lo, hi = (np.percentile(seen, 4), np.percentile(seen, 96)) if seen.size else (0.0, 1.0)   # stretch contrast per frame
+        span = max(hi - lo, 0.12)
         for y in range(0, sprite.h, 2):
             h = _click_handler(sprite, col0, y + 1.0)
             row = []
@@ -53,8 +58,8 @@ def sprite_rows(sprite: Sprite, t: float, col0: int) -> list[list[tuple]]:
                     continue
                 px = [p for p, v in ((img[y, x], tv), (img[y + 1, x], bv)) if v]
                 c = sum(int(q[0]) for q in px) / len(px), sum(int(q[1]) for q in px) / len(px), sum(int(q[2]) for q in px) / len(px)
-                lum = (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) / 255
-                ch = ramp[min(len(ramp) - 1, int(lum ** 0.8 * len(ramp)))]
+                lum = min(1.0, max(0.0, ((lum_all[y, x] + lum_all[y + 1, x]) / 2 - lo) / span))
+                ch = ramp[min(len(ramp) - 1, int(lum * len(ramp)))]
                 col = "#%02x%02x%02x" % tuple(min(255, int(v * 1.25 + 20)) for v in c)
                 row.append((f"fg:{col}", ch, h))
             rows.append(row)
