@@ -33,7 +33,7 @@ ASCII_RAMP = " .,:;-=+*#%@"
 
 def sprite_rows(sprite: Sprite, t: float, col0: int) -> list[list[tuple]]:
     """Fragment lines (each cell = 1 fragment) + click handler -> water drop."""
-    if sprite.view is not None:                       # image protocol: the picture is sent separately, the grid holds placeholders
+    if sprite.view is not None and not getattr(sprite.view, "hidden", False):   # image protocol: the picture is sent separately, the grid holds placeholders
         try:
             sprite.render_hd(t)
             st = sprite.view.style()

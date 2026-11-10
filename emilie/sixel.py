@@ -120,6 +120,7 @@ class View:
         self.cells = [" " * cols for _ in range(rows)]
         self.esc = ""
         self.n = 0
+        self.hidden = False          # True while the whole logo is not on screen: the UI then shows half-blocks instead
 
     def send(self, rgba: np.ndarray) -> None:
         self.esc = encode(np.ascontiguousarray(rgba[..., :3]), self.COLORS, rgba[..., 3] > 127)

@@ -796,8 +796,9 @@ class TUI:
                 left, right = ident + sys_rows + ext_rows + keys + credit, []
             left = fit(left, n)
             right = right[:n]
+            self._sx_sync()
             sprows = anim.sprite_rows(self.sprite, t, col0=1)
-            sxv = self.sprite.view if getattr(self.sprite.view, "esc", None) is not None else None   # Sixel picture, if any
+            sxv = self.sprite.view if getattr(self.sprite.view, "esc", None) is not None and not self.sprite.view.hidden else None   # Sixel picture, if any
             for i, row in enumerate(sprows):
                 out.append(("", " "))
                 out += row
@@ -869,11 +870,38 @@ class TUI:
         w = self.conv_win.render_info
         return max(1, w.window_height) if w else max(5, self._cols_rows()[1] - 10)
 
+    def _sx_sync(self) -> None:
+        """A Sixel picture is a bitmap pasted on the screen: it does not scroll with the text. So it is shown only while
+        the whole logo is in view (banner at the very top, no overlay); otherwise the logo is drawn with half-blocks.
+        When it stops being shown the screen is wiped once, so no stale picture stays behind."""
+        view = getattr(self.sprite, "view", None) if self.sprite is not None else None
+        if view is None or getattr(view, "esc", None) is None:
+            return
+        shown = self._top_line() == 0 and self.overlay is None
+        if view.hidden == (not shown):
+            return
+        view.hidden = not shown
+        self._banner_cache = None
+        if not shown and self.app is not None:
+            app = self.app
+
+            def wipe():
+                try:
+                    app.renderer.clear()
+                    app.invalidate()
+                except Exception:
+                    pass
+            try:
+                app.loop.call_soon_threadsafe(wipe)
+            except Exception:
+                pass
+
     def banner_visible(self) -> bool:
         return self._top_line() < self._banner_rows
 
     def _conv_lines(self) -> list:
         """All conversation lines (banner + entries + streaming tail). Built incrementally & cached."""
+        self._sx_sync()
         width = self._conv_width()
         # --- body: rebuilt only when entries/width change (not every frame / every scroll) ---
         bkey = (self.version, width)
