@@ -27,6 +27,9 @@ def _click_handler(sprite: Sprite, col0: int, y_px: float, per: int = 1):
     return handler
 
 
+ASCII_RAMP = " .,:;-=+*#%@"
+
+
 def sprite_rows(sprite: Sprite, t: float, col0: int) -> list[list[tuple]]:
     """Fragment lines (each cell = 1 fragment) + click handler -> water drop."""
     if sprite.view is not None:                       # image protocol: the picture is sent separately, the grid holds placeholders
@@ -38,6 +41,24 @@ def sprite_rows(sprite: Sprite, t: float, col0: int) -> list[list[tuple]]:
             sprite.view = None                        # something went wrong -> fall back to half-block for good
     img, vis = sprite.render(t)
     rows = []
+    if getattr(sprite, "ascii", False):               # ASCII mode: one character per cell, picked by brightness, tinted with the real colour
+        ramp = ASCII_RAMP
+        for y in range(0, sprite.h, 2):
+            h = _click_handler(sprite, col0, y + 1.0)
+            row = []
+            for x in range(sprite.w):
+                tv, bv = vis[y, x], vis[y + 1, x]
+                if not (tv or bv):
+                    row.append(("", " ", h))
+                    continue
+                px = [p for p, v in ((img[y, x], tv), (img[y + 1, x], bv)) if v]
+                c = sum(int(q[0]) for q in px) / len(px), sum(int(q[1]) for q in px) / len(px), sum(int(q[2]) for q in px) / len(px)
+                lum = (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) / 255
+                ch = ramp[min(len(ramp) - 1, int(lum ** 0.8 * len(ramp)))]
+                col = "#%02x%02x%02x" % tuple(min(255, int(v * 1.25 + 20)) for v in c)
+                row.append((f"fg:{col}", ch, h))
+            rows.append(row)
+        return rows
     for y in range(0, sprite.h, 2):
         h = _click_handler(sprite, col0, y + 1.0)
         row = []

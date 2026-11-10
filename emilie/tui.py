@@ -306,7 +306,8 @@ class TUI:
         self._logo_auto = True
         from .effort import load_settings as _ls
         self.fps = int(_ls().get("fps") or FPS)
-        self.still = bool(_ls().get("logo_still"))
+        self.ascii = bool(_ls().get("logo_ascii"))
+        self.still = bool(_ls().get("logo_still")) and not self.ascii
         self.borders_anim = _ls().get("borders_anim", True) is not False
         self.logo_error: str | None = None
         self.sel: dict | None = None             # text selection: {"a": (row, col), "b": (row, col), "active": bool, "w": width}
@@ -382,7 +383,7 @@ class TUI:
             self._logo_auto = not fixed
             cols = int(fixed or self._auto_logo_cols(rows))
             from . import gfx
-            hd = gfx.supported() and not paths.env("LOGO_LOWRES")
+            hd = gfx.supported() and not paths.env("LOGO_LOWRES") and not self.ascii   # ASCII needs the cell grid, not real pixels
             if logo.needs_decode(p, hd) and not getattr(self, "_announced", False):
                 self._announced = True
                 sys.stdout.write(tr_('\x1b[2m(=^.^=) preparing the logo video (first run only, a few seconds)...\x1b[0m\n'))
@@ -393,6 +394,7 @@ class TUI:
             else:
                 src = logo.Source(p, hd)
             self.sprite = logo.Sprite(src, cols, gfx=hd)
+            self.sprite.ascii = self.ascii
         except Exception as e:
             self.logo_error = f"{type(e).__name__}: {e}"
 
@@ -418,10 +420,25 @@ class TUI:
 
     def set_still(self, still: bool) -> str:
         from .effort import save_settings
-        self.still = still
-        save_settings(logo_still=still)
+        self.still, self.ascii = still, False
+        save_settings(logo_still=still, logo_ascii=False)
         self._reload_logo_keep_time()
         return tr_('logo -> still image (low CPU)') if still else tr_('logo -> video')
+
+    def set_ascii(self, on: bool) -> str:
+        from .effort import save_settings
+        self.ascii, self.still = on, False
+        save_settings(logo_ascii=on, logo_still=False)
+        self._reload_logo_keep_time()
+        return tr_('logo -> ASCII video') if on else tr_('logo -> video')
+
+    def cycle_logo_mode(self) -> str:
+        """Alt+I: video -> still -> ASCII -> video."""
+        if self.ascii:
+            return self.set_still(False)
+        if self.still:
+            return self.set_ascii(True)
+        return self.set_still(True)
 
     # ================================================================ helpers
     @staticmethod
@@ -681,6 +698,8 @@ class TUI:
             vis = config.VISION_MODEL or "-"
             term = "truecolor" if os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit") else "256-color"
             fps = tr_('video @ {0}fps', self.fps) if self.sprite.src.is_video else tr_('still image')
+            if self.ascii:
+                fps = "ASCII " + fps
             if self.sprite.view is not None:
                 term, fps = "kitty-gfx HD", (f"{self.sprite.src.fps:g}fps" if self.sprite.src.is_video else fps)
 
@@ -1582,7 +1601,7 @@ class TUI:
 
         @kb.add("escape", "i", filter=free)
         def _(event):
-            self.flash(self.set_still(not self.still))
+            self.flash(self.cycle_logo_mode())
 
         @kb.add("escape", "c", filter=free)
         def _(event):
@@ -1834,6 +1853,9 @@ class TuiHooks:
 
     def set_still(self, still):
         return self.tui.set_still(still)
+
+    def set_ascii(self, on):
+        return self.tui.set_ascii(on)
 
     def set_borders(self, on):
         return self.tui.set_borders(on)
