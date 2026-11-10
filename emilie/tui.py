@@ -63,7 +63,8 @@ ptfast.install()
 
 FPS = 12
 FPS_CHOICES = (8, 12, 18, 24, 30)
-SMOOTH_TAU = 0.075       # smooth-scroll time constant (seconds): smaller = snappier, larger = floatier
+SMOOTH_TAU = 0.0         # smooth-scroll time constant (seconds). 0 = like a terminal: the view stops the moment the wheel/fingers stop.
+                         # >0 (/scroll smooth <ms>) glides toward the target, which can keep moving after you let go
 CALM_FREEZE = False      # True: freeze animations when idle for CALM_SECS (static screen -> native Shift+drag selection)
 CALM_SECS = 2.0         # no key/mouse activity and agent idle for this long -> banner/border/cursor animations freeze
 CC_WINDOW = 3.0          # seconds: a second Ctrl+C inside this window = exit
@@ -1049,7 +1050,7 @@ class TUI:
     def scroll_by(self, n: int, smooth: bool = True) -> None:
         """Scroll n lines. smooth=True: set a target, the animator thread eases toward it (no jumps)."""
         mx = max(0, self._total - self._conv_vh())
-        if not smooth:
+        if not smooth or self._tau <= 0.001:          # no easing: move exactly the lines asked, right now, nothing queued
             self._tgt = None
             new = max(0, min(mx, self._top_line() + n))
             self.scroll, self.follow = new, new >= mx
