@@ -41,7 +41,7 @@ LEVELS: dict[str, Effort] = {
     "high": Effort("high", 8192, 20_000, 2000, 30, 90_000,
                    "Work carefully, explain important decisions, and verify the result.",
                    N_('thorough: looser answer and context limits')),
-    "max": Effort("max", 16384, 40_000, 2000, 60, 160_000,
+    "max": Effort("max", 16384, 40_000, 2000, 150, 160_000,
                   "Very thorough: check edge cases and verify by running tests when available.",
                   N_('no limits: loosest caps, spends tokens freely')),
 }
@@ -60,6 +60,16 @@ def save_settings(**kv) -> None:
     data = load_settings()
     data.update(kv)
     SETTINGS.write_text(json.dumps(data, indent=2))
+
+
+def unset_settings(*keys: str) -> None:
+    """Remove settings so that the built-in defaults apply again (better than storing null)."""
+    data = load_settings()
+    if any(k in data for k in keys):
+        for k in keys:
+            data.pop(k, None)
+        HOME_DIR.mkdir(parents=True, exist_ok=True)
+        SETTINGS.write_text(json.dumps(data, indent=2))
 
 
 def load_effort() -> Effort:

@@ -1,4 +1,5 @@
 """Tool definitions (schema) and implementation."""
+import json
 import os
 import re
 import shutil
@@ -26,8 +27,102 @@ def _skipped(p: Path) -> bool:
 
 
 # ------------------------------------------------------------------ file
-def read_file(path: str, offset: int = 1, limit: int = 0) -> str:
-    lines = Path(path).expanduser().read_text(errors="replace").splitlines()
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+PENDING_IMAGES: list[str] = []          # image files read_file wants the model to SEE; the agent attaches them next
+
+
+def _page_range(spec: str, total: int) -> list[int]:
+    """'3', '2-5', '1,4-6' -> 0-based page indexes inside 0..total-1 (empty spec = first 20 pages)."""
+    if not (spec or "").strip():
+        return list(range(min(total, 20)))
+    out: list[int] = []
+    for part in spec.replace(" ", "").split(","):
+        a, _, b = part.partition("-")
+        if not a.isdigit() or (b and not b.isdigit()):
+            raise ValueError(f"bad pages '{spec}': use e.g. 3, 2-5 or 1,4-6")
+        lo, hi = int(a), int(b or a)
+        out += [p - 1 for p in range(max(1, lo), min(total, hi) + 1)]
+    return out
+
+
+def _read_pdf(p: Path, pages: str) -> str:
+    try:
+        import logging
+        from pypdf import PdfReader
+        logging.getLogger("pypdf").setLevel(logging.CRITICAL)      # its warnings would be printed over the screen
+    except ImportError:
+        return "ERROR: reading PDFs needs the 'pypdf' package: run  pip install pypdf  (or reinstall Emilie)"
+    try:
+        reader = PdfReader(str(p))
+        if reader.is_encrypted:
+            return "ERROR: this PDF is password protected"
+        total = len(reader.pages)
+        idx = _page_range(pages, total)
+        parts, empty = [], 0
+        for i in idx:
+            text = (reader.pages[i].extract_text() or "").strip()
+            empty += 0 if text else 1
+            parts.append(f"--- page {i + 1} of {total} ---\n{text}")
+    except ValueError as e:
+        return f"ERROR: {e}"
+    except Exception as e:
+        return f"ERROR: could not read the PDF: {type(e).__name__}: {e}"
+    body = "\n\n".join(parts)
+    if idx and empty == len(idx):
+        return (f"(no text found on pages {idx[0] + 1}-{idx[-1] + 1} of {total}: this looks like a scanned PDF made of "
+                "images, which cannot be read as text)")
+    if len(idx) >= total:
+        more = ""
+    elif not (pages or "").strip():
+        more = f"\n\n[showing the first {len(idx)} of {total} pages; pass pages=\"{len(idx) + 1}-{min(total, len(idx) + 20)}\" for the next ones]"
+    else:
+        more = f"\n\n[showing {len(idx)} of {total} pages]"
+    return _clip(body) + more
+
+
+def _read_notebook(p: Path) -> str:
+    try:
+        nb = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+        cells = nb.get("cells", [])
+    except (ValueError, AttributeError) as e:
+        return f"ERROR: not a valid notebook: {e}"
+    out = []
+    for i, c in enumerate(cells, 1):
+        src = "".join(c.get("source", [])) if isinstance(c.get("source"), list) else str(c.get("source", ""))
+        out.append(f"--- cell {i} [{c.get('cell_type', '?')}] ---\n{src}")
+        for o in (c.get("outputs") or [])[:3]:
+            txt = o.get("text") or (o.get("data") or {}).get("text/plain") or ""
+            txt = "".join(txt) if isinstance(txt, list) else str(txt)
+            if txt.strip():
+                out.append(f"[output]\n{txt.strip()[:1500]}")
+    note = "\n\n[cells are numbered from 1; change them with notebook_edit and run them with notebook_run, not edit_file]"
+    return (_clip("\n\n".join(out)) or "(empty notebook)") + note
+
+
+def read_file(path: str, offset: int = 1, limit: int = 0, pages: str = "") -> str:
+    p = Path(path).expanduser()
+    ext = p.suffix.lower()
+    if ext == ".pdf":
+        return _read_pdf(p, pages)
+    if ext == ".ipynb":
+        return _read_notebook(p)
+    if ext in (".docx", ".xlsx", ".xlsm", ".pptx"):         # zip packages: reading them as text would return binary noise
+        from . import office_docx, office_xlsx
+        if ext == ".docx":
+            return office_docx.docx_read(path, offset, limit)
+        return office_xlsx.pptx_read(path) if ext == ".pptx" else office_xlsx.xlsx_read(path)
+    if ext in IMAGE_EXTS:
+        if not p.is_file():
+            return f"ERROR: {p} not found"
+        try:
+            from PIL import Image
+            with Image.open(p) as im:
+                w, h = im.size
+        except Exception as e:
+            return f"ERROR: not a readable image: {e}"
+        PENDING_IMAGES.append(str(p))
+        return f"Image {p.name} ({w}x{h}, {p.stat().st_size // 1024} KB) is attached below as a picture for you to look at."
+    lines = p.read_text(errors="replace").splitlines()
     total = len(lines)
     offset = max(1, int(offset or 1))
     limit = min(int(limit or LIMITS["read_lines"]), LIMITS["read_lines"])
@@ -52,12 +147,16 @@ def _write_text(p: Path, text: str, eol: str) -> None:
         f.write(text.replace("\n", eol) if eol != "\n" else text)
 
 
-def write_file(path: str, content: str) -> str:
+def write_file(path: str, content: str, append: bool = False) -> str:
+    """Write a file, or with append=True add to its end (to build a big file in several small calls)."""
     p = Path(path).expanduser()
     p.parent.mkdir(parents=True, exist_ok=True)
-    eol = _read_text(p)[1] if p.is_file() else "\n"      # overwriting keeps the file's line endings
-    _write_text(p, content.replace("\r\n", "\n"), eol)
-    return f"Wrote {len(content)} chars to {p}"
+    old, eol = _read_text(p) if p.is_file() else ("", "\n")      # overwriting keeps the file's line endings
+    body = content.replace("\r\n", "\n")
+    if append and old:
+        body = old + body
+    _write_text(p, body, eol)
+    return f"{'Appended' if append else 'Wrote'} {len(content)} chars to {p}"
 
 
 def compute_edit(path: str, old_string: str = "", new_string: str = "", replace_all: bool = False,
@@ -134,13 +233,52 @@ def glob(pattern: str, path: str = ".") -> str:
 
 # ------------------------------------------------------------------ shell
 IS_WIN = os.name == "nt"
-PLATFORM_NOTE = ("OS: Windows. The bash tool runs commands in PowerShell (use PowerShell/Windows syntax and backslash or "
-                 "forward-slash paths, not Linux-only tools)." if IS_WIN else "")
+PLATFORM_NOTE = ("OS: Windows. The bash tool runs commands in PowerShell, NOT bash: use PowerShell syntax. "
+                 "Chain with ';' (a '&&' is translated for you, '||' is not available); there is no tail/head/grep/wc/cat -n/sed/awk "
+                 "(use Select-Object -Last/-First N, Select-String, Measure-Object, Get-Content); do not append '2>&1 | ...' to "
+                 "native programs; paths may use '/' or a backslash. For a long install or build pass timeout=<seconds> (up to 900) "
+                 "or use bash_bg; for another folder pass cwd=<dir> instead of 'cd x && ...'." if IS_WIN else "")
+
+
+def _split_and(command: str) -> list[str]:
+    """Split on a top-level '&&' (outside quotes). Used to make bash-style chains work in Windows PowerShell 5.1."""
+    parts, cur, q, i = [], [], None, 0
+    while i < len(command):
+        ch = command[i]
+        if q:
+            cur.append(ch)
+            if ch == q:
+                q = None
+        elif ch in "'\"":
+            q = ch
+            cur.append(ch)
+        elif command.startswith("&&", i):
+            parts.append("".join(cur).strip())
+            cur = []
+            i += 1
+        else:
+            cur.append(ch)
+        i += 1
+    parts.append("".join(cur).strip())
+    return parts
+
+
+def _ps_chain(command: str) -> str:
+    """'a && b && c'  ->  'a; if ($?) { b; if ($?) { c } }'  (PowerShell 5.1 has no '&&')."""
+    parts = _split_and(command)
+    if len(parts) < 2 or not all(parts):
+        return command
+    out = parts[-1]
+    for p in reversed(parts[:-1]):
+        out = f"{p}; if ($?) {{ {out} }}"
+    return out
 
 
 def _shell_cmd(command: str) -> list[str]:
     """Windows: PowerShell (pwsh if present), UTF-8 output."""
     exe = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
+    if not shutil.which("pwsh"):
+        command = _ps_chain(command)           # Windows PowerShell 5.1 has no '&&'
     prefix = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $ProgressPreference='SilentlyContinue'; "
     return [exe, "-NoProfile", "-NonInteractive", "-Command", prefix + command]
 
@@ -163,15 +301,25 @@ def _kill_group(proc: subprocess.Popen) -> None:
         pass
 
 
-def bash(command: str) -> str:
+def bash(command: str, timeout: int = 120, cwd: str | None = None) -> str:
     """Run a command; short polling so an interrupt (Ctrl+C) can get in and child processes are stopped too."""
+    try:
+        limit = max(1, min(int(timeout), 900))
+    except (TypeError, ValueError):
+        limit = 120
+    if cwd:
+        cwd = os.path.expanduser(str(cwd))
+        if not os.path.isdir(cwd):
+            return f"ERROR: cwd '{cwd}' is not a directory"
+    else:
+        cwd = None
     if IS_WIN:
         proc = subprocess.Popen(_shell_cmd(command), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+                                stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", cwd=cwd,
                                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
     else:
         proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, start_new_session=True)
+                                text=True, start_new_session=True, cwd=cwd)
     waited = 0.0
     try:
         while True:
@@ -180,9 +328,10 @@ def bash(command: str) -> str:
                 break
             except subprocess.TimeoutExpired:
                 waited += 0.2
-                if waited >= 120:
+                if waited >= limit:
                     _kill_group(proc)
-                    return "ERROR: timeout 120s"
+                    return (f"ERROR: timeout {limit}s - the command was stopped. If it is just slow (network, install, build), "
+                            f"run it again with a larger timeout (max 900) or start it with bash_bg and read bg_output.")
     except BaseException:           # KeyboardInterrupt etc.: do not leave an orphan process
         _kill_group(proc)
         raise
@@ -388,6 +537,27 @@ def todo_write(todos: list) -> str:
 
 
 # ------------------------------------------------------------------ registry
+def invoke(name: str, args: dict) -> str:
+    """Call a tool with the model's arguments. Models trained on other agents often add arguments we do not have
+    (description, run_in_background, path ...): drop them and say so instead of failing the whole call."""
+    import inspect
+    fn = TOOLS[name][0]
+    args = dict(args or {})
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return fn(**args)
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return fn(**args)
+    extra = [k for k in args if k not in params]
+    for k in extra:
+        args.pop(k)
+    out = fn(**args)
+    if extra:
+        out = f"NOTE: ignored unknown argument(s): {', '.join(extra)} (this tool accepts: {', '.join(params)}).\n{out}"
+    return out
+
+
 def _schema(name, desc, props, required):
     return {"name": name, "description": desc,
             "input_schema": {"type": "object", "properties": props, "required": required}}
@@ -406,10 +576,14 @@ _todo_item = {"type": "object", "properties": {
 TOOLS = {
     "read_file": (read_file, _schema(
         "read_file", "Read a file; output is line-numbered as 'number<TAB>content' (do not include the numbers when editing). "
-                     "Use offset/limit for large files.",
-        {"path": _s, "offset": _i, "limit": _i}, ["path"]), "file", False),
-    "write_file": (write_file, _schema("write_file", "Write/overwrite a file", {"path": _s, "content": _s},
-                                       ["path", "content"]), "file", True),
+                     "Use offset/limit for large files. Also reads PDFs (text; use pages like '1-5', default first 20), "
+                     "Jupyter notebooks (.ipynb), Word/Excel/PowerPoint files (.docx/.xlsx/.pptx, as text) and images "
+                     "(png/jpg/gif/webp/bmp: the picture is attached so you can see it).",
+        {"path": _s, "offset": _i, "limit": _i, "pages": _s}, ["path"]), "file", False),
+    "write_file": (write_file, _schema(
+        "write_file", "Write/overwrite a file. With append=true the content is added to the END of the file instead: "
+                      "use it to write a big file in several parts so one call never hits the output limit.",
+        {"path": _s, "content": _s, "append": {"type": "boolean"}}, ["path", "content"]), "file", True),
     "edit_file": (edit_file, _schema(
         "edit_file", "Replace text in a file. Give old_string + new_string (old_string must be unique unless "
                      "replace_all is true, e.g. to rename a variable). For several changes to ONE file pass "
@@ -424,7 +598,11 @@ TOOLS = {
              "search", False),
     "glob": (glob, _schema("glob", "Find files by glob pattern, e.g. **/*.py", {"pattern": _s, "path": _s},
                            ["pattern"]), "search", False),
-    "bash": (bash, _schema("bash", "Run a shell command", {"command": _s}, ["command"]), "shell", True),
+    "bash": (bash, _schema(
+        "bash", "Run a shell command (PowerShell on Windows, sh elsewhere). Optional: timeout in seconds (default 120, max 900) "
+                "for slow installs/builds, cwd to run in another folder. Anything that may run for minutes or never ends "
+                "(dev server, watcher) belongs in bash_bg.",
+        {"command": _s, "timeout": _i, "cwd": _s}, ["command"]), "shell", True),
     "bash_bg": (bash_bg, _schema(
         "bash_bg", "Run a long-running command in the BACKGROUND (dev server, file watcher, slow build/test) and "
                    "return immediately with a task id. Use plain bash for anything that finishes quickly.",
@@ -458,6 +636,55 @@ def register(name: str, fn, schema: dict, group: str) -> None:
 def unregister(name: str) -> None:
     if TOOLS.pop(name, None) is not None:
         SCHEMAS[:] = [v[1] for v in TOOLS.values()]
+
+
+def repair_json(raw: str) -> dict | None:
+    """Fix the small syntax slips weaker models make in tool arguments, or return None. It only repairs things that
+    cannot change the meaning: a ```json fence, text around the object, trailing commas, Python True/False/None, an
+    object written with single quotes, and raw newlines/tabs inside strings. It never invents missing closing brackets:
+    that means the answer was cut off, which is handled separately."""
+    s = (raw or "").strip()
+    if not s:
+        return {}
+    s = re.sub(r"^```(?:json)?\s*|\s*```$", "", s)
+    a, b = s.find("{"), s.rfind("}")
+    if a == -1 or b <= a:
+        return None
+    s = s[a:b + 1]
+    candidates = [s, re.sub(r",\s*([}\]])", r"\1", s)]
+    t = candidates[1]
+    candidates.append(re.sub(r"\bTrue\b", "true", re.sub(r"\bFalse\b", "false", re.sub(r"\bNone\b", "null", t))))
+    if '"' not in s and "'" in s:                       # {'a': 'b'}
+        candidates.append(candidates[-1].replace("'", '"'))
+    for c in candidates:
+        for strict in (True, False):                     # strict=False accepts raw newlines/tabs inside strings
+            try:
+                v = json.loads(c, strict=strict)
+            except ValueError:
+                continue
+            if isinstance(v, dict):
+                return v
+    return None
+
+
+def shorten(names: list[str]) -> list[str]:
+    """For display: ['mcp__browser__a', 'mcp__browser__b', 'bash'] -> ['browser (2)', 'bash']. A browser server brings
+    25+ tools; listing every name made the welcome banner taller than the screen."""
+    out: list[str] = []
+    servers: dict[str, int] = {}
+    for n in names:
+        if n.startswith("mcp__") and n.count("__") >= 2:
+            srv = n.split("__")[1]
+            servers[srv] = servers.get(srv, 0) + 1
+        else:
+            out.append(n)
+    return out + [f"{s} ({k})" for s, k in servers.items()]
+
+
+from . import office_docx, office_nb, office_xlsx  # noqa: E402  (notebook, Word, Excel, PowerPoint tools)
+TOOLS.update(office_nb.specs(_schema, _s, _i))
+TOOLS.update(office_docx.specs(_schema, _s, _i))
+TOOLS.update(office_xlsx.specs(_schema, _s, _i))
 
 
 def groups() -> dict[str, list[str]]:

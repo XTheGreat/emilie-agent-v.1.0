@@ -136,7 +136,9 @@ def _input_args(dev: str | None) -> list[str]:
     if src and src.startswith("lavfi:"):
         return ["-re", "-f", "lavfi", "-i", src[6:]]
     if IS_WIN:
-        return ["-f", "dshow", "-framerate", str(STREAM_FPS), "-video_size", "640x480", "-i", f"video={dev or ''}"]
+        # No -framerate/-video_size: a laptop webcam only offers fixed combinations (e.g. 640x480 only at 30 fps), and
+        # asking for 640x480 at 10 fps fails with "I/O error". Let the camera pick; start() lowers it to STREAM_FPS.
+        return ["-f", "dshow", "-i", f"video={dev or ''}"]
     return ["-f", "v4l2", "-framerate", str(STREAM_FPS), "-video_size", "640x480", "-i", dev or ""]
 
 
@@ -182,6 +184,8 @@ class Stream:
             dev = first if first and _exists(first) else devs[0]
         self.device = dev or "test source"
         vf = f"scale={self.w}:{self.h}:force_original_aspect_ratio=increase,crop={self.w}:{self.h}"
+        if IS_WIN and not (src and src.startswith("lavfi:")):
+            vf = f"fps={STREAM_FPS}," + vf               # the camera runs at its own rate (usually 30): keep 10
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", *_input_args(dev), "-vf", vf,
                "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
         try:

@@ -14,8 +14,10 @@ from .i18n import t as tr_, N_
 from .theme import ADD, DEL, ERR, LAV, MUTED, OK, ROSE, WARN
 
 LABELS = {"bash": "Bash", "bash_bg": "Bash(bg)", "bg_output": "BgOutput", "bg_stop": "BgStop", "write_file": "Write", "edit_file": "Update",
-          "read_file": "Read", "grep": "Search", "glob": "Glob", "web_fetch": "Fetch", "web_search": "WebSearch", "task": "Task",
-          "todo_write": "Todos", "use_skill": "Skill"}
+          "read_file": "Read", "grep": "Search", "glob": "Glob", "web_fetch": "Fetch", "web_search": "WebSearch", "task": "Task", "tasks": "Tasks", "exit_plan_mode": "Plan",
+          "todo_write": "Todos", "use_skill": "Skill",
+          "notebook_edit": "Notebook", "notebook_run": "NotebookRun", "docx_read": "Docx", "docx_edit": "DocxEdit",
+          "docx_create": "DocxNew", "xlsx_read": "Xlsx", "xlsx_write": "XlsxEdit", "pptx_read": "Pptx"}
 
 
 def label(name: str) -> str:
@@ -43,6 +45,11 @@ def _target(name: str, args: dict) -> str:
         return args.get("query", "")
     if name == "task":
         return args.get("description", "")
+    if name == "tasks":
+        return ", ".join(str(j.get("description", "?")) for j in args.get("jobs", []) if isinstance(j, dict))[:100]
+    if name == "exit_plan_mode":
+        first = next((l.strip(" #*-") for l in str(args.get("plan", "")).splitlines() if l.strip()), "")
+        return first[:80]
     if name == "todo_write":
         return f"{len(args.get('todos', []))} item"
     if "path" in args:
@@ -64,7 +71,8 @@ def tool_result(console: Console, name: str, out: str, dt: float | None = None) 
     err = out.startswith("ERROR") or (name == "bash" and not out.startswith("exit=0"))
     if name == "read_file" and not err:
         n = sum(1 for l in lines if re.match(r"\s*\d+\t", l))
-        summary = [tr_('Read {n} lines', n=n) + (" (partial)" if any(l.startswith("...[lines") for l in lines) else "")]
+        summary = ([tr_('Read {n} lines', n=n) + (" (partial)" if any(l.startswith("...[lines") for l in lines) else "")]
+                   if n else [_one_line(lines[0], 80)])      # PDF, notebook, image: not a numbered text file
     elif name == "glob":
         summary = ["no files" if lines == ["no matches"] else f"{len(lines)} file"]
     elif name == "web_fetch" and not err:
@@ -75,6 +83,10 @@ def tool_result(console: Console, name: str, out: str, dt: float | None = None) 
         summary = lines[:1]
     elif name in {"write_file", "edit_file"}:
         summary = lines[:1]
+    elif name in {"notebook_edit", "docx_edit", "docx_create", "xlsx_write"}:
+        summary = [_one_line(l, 100) for l in lines[:4] if l.strip()]
+    elif name in {"docx_read", "xlsx_read", "pptx_read"} and not err:
+        summary = [_one_line(lines[0], 100)]
     elif name == "grep":
         summary = [lines[0] if lines == ["no matches"] else f"{len(lines)} kecocokan"]
     else:  # bash
@@ -106,7 +118,7 @@ def make_preview(name: str, args: dict) -> Text | None:
         elif name == "write_file":
             p = Path(args["path"]).expanduser()
             old = p.read_text() if p.exists() else ""
-            new = args["content"]
+            new = old + args["content"] if args.get("append") else args["content"]
         else:
             return None
     except (OSError, KeyError, UnicodeDecodeError):
@@ -173,8 +185,21 @@ def read_key() -> str:
         return b.decode(errors="ignore").lower()
 
 
+def plan_panel(plan: str) -> tuple[Panel, Text]:
+    """The plan the model wants approved (exit_plan_mode): the plan as markdown + three clear choices."""
+    from rich.markdown import Markdown
+    opts = Text()
+    opts.append("[y]", style=f"bold {OK}"); opts.append(tr_(" approve, ask before each change   "))
+    opts.append("[t]", style=f"bold {ROSE}"); opts.append(tr_(" approve and run on its own   "))
+    opts.append("[n]", style=f"bold {ERR}"); opts.append(tr_(" keep planning"))
+    return (Panel(Markdown((plan or "(empty plan)")[:8000]), title=tr_('[bold {LAV}]plan: ready to start?[/]', LAV=LAV),
+                  title_align="left", border_style=LAV, padding=(0, 1)), opts)
+
+
 def permission_panel(name: str, args: dict, reason: str) -> tuple[Panel, Text]:
     """(detail panel, choice lines) - used by both classic and full-screen mode."""
+    if name == "exit_plan_mode":
+        return plan_panel(str(args.get("plan", "")))
     body = [Text(_target(name, args)[:2500], style="bold")]
     if reason:
         body.append(Text(f"! {reason}", style=WARN))
@@ -231,8 +256,10 @@ def print_todos(console: Console, todos: list[dict]) -> None:
     t = Text()
     for i, it in enumerate(todos):
         st = it.get("status")
-        mark, style = {"completed": ("☑", f"{MUTED} strike"), "in_progress": ("◐", f"bold {ROSE}")}.get(st, ("☐", ""))
-        t.append(f"{mark} {it.get('content', '')}", style=style)
+        # plain text glyphs (no checkbox emoji, which some terminals draw as a colored box)
+        mark, style = {"completed": ("✓", f"{MUTED} strike"), "in_progress": ("●", f"bold {ROSE}")}.get(st, ("○", ""))
+        t.append(f"{mark} ", style=MUTED if st == "completed" else style)   # the tick itself is not struck through
+        t.append(it.get("content", ""), style=style)
         if i < len(todos) - 1:
             t.append("\n")
     done = sum(1 for x in todos if x.get("status") == "completed")

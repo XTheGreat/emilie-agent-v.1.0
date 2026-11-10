@@ -1,5 +1,6 @@
 import json
 import os
+import queue
 import re
 import threading
 import time
@@ -11,11 +12,11 @@ from rich.panel import Panel
 from rich.text import Text
 
 from .i18n import t as tr_
-from . import claude, context, hooks, session, skills, tools, ui
+from . import claude, clip, context, hooks, session, skills, tools, ui
 from . import companion, language, persona, voice
-from .config import API_KEY, BASE_URL, MODEL, PROVIDER, VISION_MODEL
+from .config import API_KEY, BASE_URL, MODEL, PROVIDER, PROVIDER_ID, VISION_MODEL
 from .effort import Effort, load_settings
-from .policy import Policy
+from .policy import Policy, WRITE_TOOLS
 from .stream import StreamView, is_quota_error
 from .theme import ERR, MUTED, ROSE, WARN
 
@@ -34,6 +35,8 @@ Working rules:
   Prefer these over driving a browser when you only need to read information.
 - For wide searches ("where is X handled", "survey this codebase", multi-page web research) delegate to the task tool:
   a read-only sub-agent investigates in its own context and returns a short report. Do small lookups yourself.
+- Jupyter notebooks: change cells with notebook_edit and run them with notebook_run; never edit the .ipynb JSON by hand.
+  Word, Excel, PowerPoint: docx_read / docx_edit / docx_create, xlsx_read / xlsx_write, pptx_read (not a python script).
 - A <file> block is a file the user @-mentioned."""
 
 COMPACT_SYSTEM = ("You summarize a coding conversation so it can continue without losing context. "
@@ -162,6 +165,16 @@ class Usage:
         self.exact = self.exact and exact
 
 
+def request_timeout() -> float:
+    """Seconds the provider may stay silent before the request is given up (settings.json "timeout", default 180).
+    The SDK default is 10 minutes, which made an overloaded model look like a frozen Emilie."""
+    try:
+        v = float(load_settings().get("timeout") or 180)
+    except (TypeError, ValueError):
+        v = 180.0
+    return max(20.0, v)
+
+
 class Ckpt(dict):
     """Files as they were before one turn ({path: bytes | None}), plus where that turn started in the conversation."""
     def __init__(self, label: str = "", mark: int | None = None):
@@ -196,10 +209,22 @@ class Agent:
         self.set_effort(effort)
         if PROVIDER == "openai":
             from openai import OpenAI
-            self.client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+            self.client = OpenAI(api_key=API_KEY, base_url=BASE_URL, timeout=request_timeout(), max_retries=1)
         else:
             import anthropic
-            self.client = anthropic.Anthropic(api_key=API_KEY)
+            self.client = anthropic.Anthropic(api_key=API_KEY, timeout=request_timeout(), max_retries=1)
+        tools.register("exit_plan_mode", self.exit_plan_mode, tools.schema(
+            "exit_plan_mode", "Plan mode only: present your finished plan to the user for approval. Pass the complete "
+                              "plan as markdown (goal, steps, files you will touch). When approved, plan mode ends and "
+                              "you may start working.",
+            {"plan": {"type": "string", "description": "the full plan, markdown"}}, ["plan"]), "plan")
+        tools.register("tasks", self.run_subagents, tools.schema(
+            "tasks", "Run up to 4 read-only sub-agents IN PARALLEL, each with its own self-contained brief (see the "
+                     "task tool). Use it when a job splits into independent questions, e.g. one per module, folder or "
+                     "web topic. Returns one combined report.",
+            {"jobs": {"type": "array", "items": {"type": "object", "properties": {
+                "description": {"type": "string"}, "prompt": {"type": "string"}}, "required": ["prompt"]}}},
+            ["jobs"]), "agent")
         tools.register("task", self.run_subagent, tools.schema(
             "task", "Delegate a research job to a sub-agent with its own clean context. It can only READ (read_file, "
                     "grep, glob, web_search, web_fetch) and returns one written report. Use it for wide searches, "
@@ -209,13 +234,73 @@ class Agent:
              "prompt": {"type": "string", "description": "the full brief: what to find and what to report back"}},
             ["description", "prompt"]), "agent")
 
+    # ------------------------------------------------------------ images read with read_file
+    def _flush_images(self) -> None:
+        """A tool result is text, so a picture read with read_file is attached as a follow-up user message, exactly as if
+        the user had pasted it. Skipped (with a note) when /doctor found that this model has no vision."""
+        paths = tools.PENDING_IMAGES[:4]
+        tools.PENDING_IMAGES.clear()
+        if not paths:
+            return
+        from . import doctor
+        names = ", ".join(Path(p).name for p in paths)
+        if doctor.load_profile(PROVIDER_ID or PROVIDER, self.model).get("vision") is False:
+            self.messages.append({"role": "user", "content": f"[note] read_file opened {names}, but this model cannot "
+                                                             "see images (/doctor), so the picture is not available."})
+            return
+        encoded = []
+        for p in paths:
+            try:
+                encoded.append(clip.encode_image(Path(p).read_bytes()))
+            except Exception:
+                continue
+        if encoded:
+            self.messages.append(self._user_message(f"[the image(s) you just opened with read_file: {names}]", encoded))
+
+    # ------------------------------------------------------------ plan approval
+    def exit_plan_mode(self, plan: str = "") -> str:
+        """Called after the user approved the plan (policy asked first). Leaves plan mode so the work can start."""
+        if self.policy.mode == "plan":
+            self.policy.mode = "ask"                 # 'approve and run on its own' already set trust before we got here
+            return ("The user approved the plan. Plan mode is now off: carry it out. Record the steps with todo_write "
+                    "and work through them.")
+        if self.policy.mode == "trust":
+            return "The user approved the plan and trusts you to run on your own: carry it out without asking."
+        return "Not in plan mode: nothing to approve. Just continue with the work."
+
     # ------------------------------------------------------------ subagent
-    SUB_TOOLS = ("read_file", "grep", "glob", "web_search", "web_fetch")
+    SUB_TOOLS = ("read_file", "grep", "glob", "web_search", "web_fetch", "docx_read", "xlsx_read", "pptx_read")
     SUB_ROUNDS = 12
     SUB_SYSTEM = ("You are a research sub-agent working for another agent. Working directory: {cwd}\n{platform}\n"
                   "You can only read: read_file, grep, glob, web_search, web_fetch. You cannot change anything.\n"
                   "Investigate the brief efficiently (few, targeted calls), then reply with ONE final report: the answer "
                   "first, then the evidence (file paths with line numbers, or URLs). Be concise; no preamble.")
+
+    MAX_PARALLEL = 4
+
+    def run_subagents(self, jobs: list | None = None) -> str:
+        """Several read-only sub-agents AT THE SAME TIME (e.g. one per folder or per question). Each gets its own
+        brief and fresh context; one combined report comes back, in the order of the jobs."""
+        jobs = [j for j in (jobs or []) if isinstance(j, dict) and str(j.get("prompt", "")).strip()]
+        if not jobs:
+            return "ERROR: give jobs=[{description, prompt}, ...]"
+        if len(jobs) > self.MAX_PARALLEL:
+            return f"ERROR: at most {self.MAX_PARALLEL} jobs at once; send the rest in a second call"
+        results: list[str] = [""] * len(jobs)
+
+        def work(i: int, j: dict) -> None:
+            try:
+                results[i] = self.run_subagent(str(j.get("description", f"job {i + 1}")), str(j["prompt"]))
+            except BaseException as e:           # one failing job must not lose the others
+                results[i] = f"ERROR: {type(e).__name__}: {e}"
+
+        threads = [threading.Thread(target=work, args=(i, j), daemon=True) for i, j in enumerate(jobs)]
+        for t in threads:
+            t.start()
+        for t in threads:                         # short waits, so Ctrl+C can still get in
+            while t.is_alive():
+                t.join(0.2)
+        return "\n\n".join(f"## {j.get('description', f'job {i + 1}')}\n{r}" for i, (j, r) in enumerate(zip(jobs, results)))
 
     def run_subagent(self, description: str, prompt: str) -> str:
         """Run a read-only sub-agent in a fresh context and return its final report as the tool result."""
@@ -230,7 +315,7 @@ class Agent:
                 return f"ERROR: tool '{name}' is not available to a sub-agent"
             ui.tool_header(self.console, name, args)
             try:
-                return tools.TOOLS[name][0](**args)
+                return tools.invoke(name, args)
             except Exception as e:
                 return f"ERROR: {e}"
 
@@ -292,8 +377,17 @@ class Agent:
         if ps:
             s += "\n\n" + ps
         if self.policy.mode == "plan":
-            s += ("\n\nPLAN MODE IS ACTIVE: do not change files or run commands that write. "
-                  "Investigate with the read tools, then lay out a step-by-step plan and wait for the user's approval.")
+            s += ("\n\nPLAN MODE IS ACTIVE: do not change files or run commands that write. Investigate with the read "
+                  "tools (use the task tool for wide searches), then write a concrete step-by-step plan and call "
+                  "exit_plan_mode with the complete plan in markdown. That asks the user to approve it. Do not start "
+                  "implementing until it returns that the plan was approved; if it was not, adjust the plan and ask again.")
+        if self.policy.mode == "trust":
+            s += ("\n\nAUTONOMOUS MODE: the user trusted this folder and may walk away. Do not ask questions or for "
+                  "confirmation. Pick sensible defaults, note the assumptions in your final summary, and keep working "
+                  "until the whole task is finished and checked. For a multi-part job (e.g. a website) first write the "
+                  "plan with todo_write, then do every item. Keep each tool call small: write big files in parts "
+                  "(write_file, then write_file with append=true) so one answer never hits the output limit. "
+                  "Stop only when the work is complete or you are truly blocked.")
         if self.memory_text:
             s += "\n\n# Project memory\n" + self.memory_text
         sk = skills.prompt_section()
@@ -505,10 +599,29 @@ class Agent:
         self.save()
         return before, after
 
+    def model_context(self) -> int | None:
+        from . import models
+        return models.context_window(self.active_model, load_settings().get("context_limit"))
+
+    def compact_limit(self) -> int:
+        """Where the history is summarised: the effort level's limit, but never above 70% of this model's window
+        (a small model would otherwise overflow long before the 'max' level's 160k)."""
+        ctx = self.model_context()
+        return min(self.effort.compact_at, int(ctx * 0.7)) if ctx else self.effort.compact_at
+
+    def out_limit(self) -> int:
+        """Max answer tokens: the effort level's, but at most a quarter of a small model's window."""
+        ctx = self.model_context()
+        return min(self.effort.max_output, max(512, ctx // 4)) if ctx else self.effort.max_output
+
     def _maybe_compact(self) -> None:
-        if self.ctx_tokens() > self.effort.compact_at:
+        n = self.ctx_tokens()
+        # after a compaction the system prompt + tools may alone still exceed a tiny model's limit: then do not summarise
+        # again every round, wait until the context has grown 25% beyond where the last compaction left it
+        if n > self.compact_limit() and n > getattr(self, "_compact_floor", 0):
             try:
                 self.compact(auto=True)
+                self._compact_floor = int(self.ctx_tokens() * 1.25)
             except Exception as e:  # failing to summarise is not the same as failing to work
                 self.console.print(tr_('[{WARN}]automatic compaction failed: {e}[/]', WARN=WARN, e=e))
 
@@ -524,6 +637,9 @@ class Agent:
         if asked:
             ans = ui.ask_permission(self.console, name, args, reason)
             if ans == "n":
+                if name == "exit_plan_mode":
+                    return ("The user did not approve the plan. Plan mode stays on. Ask what they want changed (or "
+                            "revise the plan yourself) and present it again with exit_plan_mode.")
                 return "The user denied this tool call. Ask what they want or find another way."
             if ans == "a":
                 self.policy.always.add(name)
@@ -535,14 +651,16 @@ class Agent:
             return f"BLOCKED by a hook: {why}. Do not repeat it; continue or ask the user."
         ui.tool_header(self.console, name, args)
         preview = None if asked else ui.make_preview(name, args)
-        if name in {"write_file", "edit_file"}:
+        if name in WRITE_TOOLS or name == "notebook_run":
             self._checkpoint(args.get("path", ""))
+            if name == "notebook_run" and args.get("output_path"):
+                self._checkpoint(args["output_path"])
         t_tool = time.time()
         tui = getattr(self.console, "tui", None)
         if tui is not None:
             tui.mark_running(True)               # the tool line bullet blinks while it runs
         try:
-            out = tools.TOOLS[name][0](**args)
+            out = tools.invoke(name, args)
         except Exception as e:  # send the error to the model, do not crash
             out = f"ERROR: {e}"
         finally:
@@ -841,6 +959,8 @@ class Agent:
             user_text = (self._reunion + "\n\n" + user_text).strip()
             self._reunion = ""
         self.salvaged = 0
+        self._auto_n = self._auto_q = self._auto_t = 0     # automatic "keep going" nudges used in this turn
+        user_text = skills.with_hint(user_text)            # a matching skill is suggested for the first action
         self.messages.append(self._user_message(user_text, images))
         self._drop_old_video()
         try:
@@ -916,23 +1036,180 @@ class Agent:
         self._maybe_compact()
         return True
 
+    # ------------------------------------------------------------ keep going instead of stopping half way
+    AUTO_MAX, AUTO_Q_MAX, AUTO_TODO_MAX = 8, 2, 3
+    CUT_TOOL_MSG = ("ERROR: your answer hit the output token limit, so this tool call was cut off and was NOT executed. "
+                    "Retry with smaller calls: write a big file in several parts (write_file for the first part, then "
+                    "write_file with append=true for each next part), or split the work over several files.")
+    _ASKS = re.compile(r"(\?\s*$)|(would you like|do you want|shall i|should i|want me to|let me know if|"
+                       r"apakah (kamu|anda) ingin|mau (aku|saya)|perlu (aku|saya)|silakan (beri tahu|konfirmasi))", re.I)
+
+    def _autocontinue(self, text: str, truncated: bool) -> str | None:
+        """When the model ends its turn although the job is not done, the message that makes it carry on (or None).
+        - cut off by the token limit (any mode): continue where it stopped
+        - trust mode: unfinished todo items, or asking permission/questions the user already waived"""
+        n = getattr(self, "_auto_n", 0)
+        if n >= self.AUTO_MAX:
+            return None
+        if truncated:
+            self._auto_n = n + 1
+            return "(auto) Your last answer was cut off by the token limit. Continue exactly where you stopped."
+        if self.policy.mode != "trust":
+            return None
+        pending = [t for t in self.todos if isinstance(t, dict) and t.get("status") != "completed"]
+        asks = bool(self._ASKS.search((text or "").strip()[-400:]))
+        # a model that finished but forgot to tick its todo list must not be pushed forever: few nudges per reason
+        use_todo = bool(pending) and getattr(self, "_auto_t", 0) < self.AUTO_TODO_MAX
+        use_ask = asks and getattr(self, "_auto_q", 0) < self.AUTO_Q_MAX
+        if not (use_todo or use_ask):
+            return None
+        self._auto_n = n + 1
+        if use_todo:
+            self._auto_t = getattr(self, "_auto_t", 0) + 1
+        else:
+            self._auto_q = getattr(self, "_auto_q", 0) + 1
+        left = f" Unfinished todo items: {', '.join(str(t.get('content', ''))[:60] for t in pending[:5])}." if use_todo else ""
+        return ("(auto) The user trusted this folder and is away: do not ask questions or for confirmation, choose "
+                "sensible defaults and say which in your final summary. Continue with the remaining work until it is "
+                "completely finished (all files written, then run or check it), then give a short summary."
+                f"{left} If everything is really finished, mark the todos completed with todo_write and just summarise.")
+
     def _after_text(self, text: str, truncated: bool) -> None:
         if truncated:
             self.console.print(tr_('[{WARN}]answer cut off by the effort limit {0} ({1} tokens). Use /effort to raise it[/]', self.effort.name, self.effort.max_output, WARN=WARN))
 
+    # ------------------------------------------------------------ interruptible network waits
+    @staticmethod
+    def _pump(make_iter):
+        """Yield what make_iter() produces, but run the (blocking) network reads in a helper thread.
+
+        A thread stuck in a socket read cannot receive Ctrl+C (Python only delivers it between bytecodes), so a silent
+        server made Emilie hang and ignore Ctrl+C. Here the calling thread only waits on a queue in 0.2 s steps, so an
+        interrupt arrives within a fraction of a second; the helper is told to stop and is simply abandoned (it is a
+        daemon thread and ends by itself when the request times out)."""
+        q: queue.Queue = queue.Queue()
+        stop = threading.Event()
+
+        def produce():
+            it = None
+            try:
+                it = make_iter()
+                for item in it:
+                    if stop.is_set():
+                        break
+                    q.put(("item", item))
+                q.put(("end", None))
+            except BaseException as e:               # handed to the consumer, which re-raises it
+                q.put(("err", e))
+            finally:
+                close = getattr(it, "close", None)
+                if close:
+                    try:
+                        close()
+                    except Exception:
+                        pass
+
+        threading.Thread(target=produce, daemon=True).start()
+        try:
+            while True:
+                try:
+                    kind, val = q.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if kind == "item":
+                    yield val
+                elif kind == "end":
+                    return
+                else:
+                    raise val
+        finally:
+            stop.set()
+
+    # ------------------------------------------------------------ retry + fallback model
+    RETRY_DELAYS = (2.0, 6.0)          # seconds before retry 1 and 2 (the setting "retries" can lower the count)
+    _TRANSIENT_NAMES = ("timeout", "connection", "ratelimit", "internalserver", "overloaded", "serviceunavailable")
+    _TRANSIENT_TEXT = re.compile(r"overload|rate.?limit|temporar|try again|capacity|too many requests|"
+                                 r"service unavailable|bad gateway|gateway time", re.I)
+
+    @classmethod
+    def _is_transient(cls, e: BaseException) -> bool:
+        """A failure that may well go away by itself (busy server, rate limit, network blip), unlike a wrong key or
+        a malformed request, which retrying cannot fix."""
+        code = getattr(e, "status_code", None)
+        if isinstance(code, int):
+            return code in (408, 409, 425, 429, 500, 502, 503, 504, 529)
+        if any(n in type(e).__name__.lower() for n in cls._TRANSIENT_NAMES):
+            return True
+        return bool(cls._TRANSIENT_TEXT.search(str(e)))
+
+    @staticmethod
+    def _retry_after(e: BaseException) -> float | None:
+        try:
+            v = e.response.headers.get("retry-after")
+            return float(v) if v else None
+        except Exception:
+            return None
+
+    def _resilient(self, make_iter):
+        """_pump with recovery: when the request fails BEFORE any answer arrived (busy server, rate limit, timeout),
+        wait and retry; if it keeps failing and a fallback model is set (/fallback), switch to it. A failure in the
+        middle of an answer is not retried (the progress is kept by _salvage instead)."""
+        cfg = load_settings()
+        delays = self.RETRY_DELAYS[:max(0, int(cfg.get("retries", len(self.RETRY_DELAYS))))]
+        fallback = cfg.get("fallback_model") or None
+        attempt, switched = 0, False
+        while True:
+            got = False
+            try:
+                for item in self._pump(make_iter):
+                    got = True
+                    yield item
+                return
+            except GeneratorExit:
+                raise
+            except BaseException as e:
+                if got or isinstance(e, (KeyboardInterrupt, SystemExit)) or not self._is_transient(e):
+                    raise
+                # a timeout already cost the whole wait (minutes): try once more at most, then move on
+                limit = min(1, len(delays)) if "timeout" in type(e).__name__.lower() else len(delays)
+                if attempt < limit:
+                    wait = min(30.0, self._retry_after(e) or delays[attempt])
+                    attempt += 1
+                    self.console.print(tr_('[{WARN}]{0}: {1} - retrying in {2:.0f}s ({3}/{4})[/]', type(e).__name__,
+                                           str(e)[:70], wait, attempt, limit, WARN=WARN))
+                    end = time.monotonic() + wait
+                    while time.monotonic() < end:           # short sleeps so Ctrl+C still works
+                        time.sleep(0.2)
+                    continue
+                if fallback and not switched and fallback != self.model:
+                    self.console.print(tr_('[{WARN}]{0} keeps failing: switching to the fallback model {1} for this session '
+                                           '(/model to change)[/]', self.model, fallback, WARN=WARN))
+                    self.model, switched, attempt = fallback, True, 0
+                    continue
+                raise
+
     # ------------------------------------------------------------ Anthropic
+    def _anthropic_events(self):
+        """Generator for _pump: ("text", str) deltas, then ("final", message)."""
+        kw = claude.request_kwargs(self.system_prompt(), tools.SCHEMAS, self.messages, self.out_limit(),
+                                   BASE_URL, int(load_settings().get("thinking") or 0))
+        with self.client.messages.stream(model=self.active_model, **kw) as stream:
+            for text in stream.text_stream:
+                yield ("text", text)
+            yield ("final", stream.get_final_message())
+
     def _loop_anthropic(self) -> None:
         rounds = 0
         while self._round_gate(rounds):
             rounds += 1
             view = StreamView(self.console).start()
+            resp = None
             try:
-                kw = claude.request_kwargs(self.system_prompt(), tools.SCHEMAS, self.messages, self.effort.max_output,
-                                           BASE_URL, int(load_settings().get("thinking") or 0))
-                with self.client.messages.stream(model=self.active_model, **kw) as stream:
-                    for text in stream.text_stream:
-                        view.text(text)
-                    resp = stream.get_final_message()
+                for kind, val in self._resilient(self._anthropic_events):
+                    if kind == "text":
+                        view.text(val)
+                    else:
+                        resp = val
             except BaseException:
                 view.abort()
                 raise
@@ -947,14 +1224,26 @@ class Agent:
             if not calls and is_quota_error("".join(b.text for b in resp.content if b.type == "text")):
                 raise QuotaExhausted("".join(b.text for b in resp.content if b.type == "text"))
             if not calls:
+                nudge = self._autocontinue("".join(b.text for b in resp.content if b.type == "text"),
+                                           resp.stop_reason == "max_tokens")
+                if nudge:
+                    self.console.print(tr_('[{MUTED}]continuing automatically...[/]', MUTED=MUTED))
+                    self.messages.append({"role": "user", "content": nudge})
+                    continue
                 return
+            if resp.stop_reason == "max_tokens":       # the tool call itself was cut off: its input is incomplete
+                self.console.print(tr_('[{WARN}]output limit reached in the middle of a tool call: asking for smaller steps[/]', WARN=WARN))
+                self.messages.append({"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": c.id, "content": self.CUT_TOOL_MSG, "is_error": True} for c in calls]})
+                continue
             results = [{"type": "tool_result", "tool_use_id": c.id,
                         "content": self._exec(c.name, c.input)} for c in calls]
             self.messages.append({"role": "user", "content": results})
+            self._flush_images()
 
     # ------------------------------------------------------------ OpenAI-compatible
     def _open_stream(self, oa_tools: list[dict]):
-        kw = dict(model=self.active_model, tools=oa_tools, stream=True, max_tokens=self.effort.max_output,
+        kw = dict(model=self.active_model, tools=oa_tools, stream=True, max_tokens=self.out_limit(),
                   messages=[{"role": "system", "content": self.system_prompt()}] + self.messages)
         if self._usage_opt:
             try:
@@ -976,7 +1265,7 @@ class Agent:
             content, calls, fin, usage = "", {}, None, None
             in_est = self.ctx_tokens()
             try:
-                for chunk in self._open_stream(oa_tools):
+                for chunk in self._resilient(lambda: self._open_stream(oa_tools)):
                     if getattr(chunk, "usage", None):
                         usage = chunk.usage
                     if not chunk.choices:
@@ -1018,10 +1307,30 @@ class Agent:
             if not calls and is_quota_error(content or ""):
                 raise QuotaExhausted(content)      # -> run_turn cleans the history
             if not calls:
+                nudge = self._autocontinue(content or "", fin == "length")
+                if nudge:
+                    self.console.print(tr_('[{MUTED}]continuing automatically...[/]', MUTED=MUTED))
+                    self.messages.append({"role": "user", "content": nudge})
+                    continue
                 return
+            if fin == "length":                    # the tool call itself was cut off: its arguments are incomplete
+                self.console.print(tr_('[{WARN}]output limit reached in the middle of a tool call: asking for smaller steps[/]', WARN=WARN))
+                for tc in self.messages[-1].get("tool_calls", []):      # broken JSON must not be replayed to the provider
+                    tc["function"]["arguments"] = "{}"
+                for c in calls.values():
+                    self.messages.append({"role": "tool", "tool_call_id": c["id"], "content": self.CUT_TOOL_MSG})
+                continue
             for c in calls.values():
                 try:
-                    out = self._exec(c["name"], json.loads(c["args"] or "{}"))
+                    args = json.loads(c["args"] or "{}")
                 except json.JSONDecodeError:
-                    out = "ERROR: tool arguments are not valid JSON"
+                    args = tools.repair_json(c["args"])       # a stray comma / single quotes / a code fence...
+                    if args is not None:
+                        self.console.print(tr_('[{MUTED}]repaired malformed tool arguments ({0})[/]', c["name"], MUTED=MUTED))
+                if args is None:
+                    out = ("ERROR: the tool arguments are not valid JSON, so nothing was run. Send them again as one "
+                           "strict JSON object (double quotes, no trailing commas).")
+                else:
+                    out = self._exec(c["name"], args)
                 self.messages.append({"role": "tool", "tool_call_id": c["id"], "content": out})
+            self._flush_images()                   # pictures read with read_file go after ALL tool results of this round

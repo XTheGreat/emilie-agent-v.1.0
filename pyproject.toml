@@ -3,7 +3,7 @@ name = "emilie-agent"
 version = "0.1.0"
 description = "Terminal coding agent with an animated Emilie banner"
 requires-python = ">=3.10"
-dependencies = ["anthropic", "openai", "rich", "pillow", "prompt_toolkit", "numpy", "av"]
+dependencies = ["anthropic", "openai", "rich", "pillow", "prompt_toolkit", "numpy", "av", "pypdf"]
 
 [project.scripts]
 emilie = "emilie.cli:main"
@@ -16,4 +16,5 @@ build-backend = "setuptools.build_meta"
 packages = ["emilie"]
 
 [tool.setuptools.package-data]
-emilie = ["locales/*.json"]
+emilie = ["locales/*.json", "builtin/skills/*/SKILL.md", "builtin/skills/*/references/*", "builtin/skills/*/scripts/*",
+          "builtin/skills/*/assets/*"]

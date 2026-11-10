@@ -1,7 +1,12 @@
-"""Minimal MCP (Model Context Protocol) client over stdio.
+"""Minimal MCP (Model Context Protocol) client: local programs over stdio, and remote servers over HTTP.
 
 Configuration (Claude-compatible format): ./.mcp.json or ~/.emilie/mcp.json
-  {"mcpServers": {"name": {"command": "npx", "args": ["-y", "server"], "env": {"KEY": "v"}}}}
+  {"mcpServers": {
+      "browser": {"command": "npx", "args": ["-y", "server"], "env": {"KEY": "v"}},
+      "remote":  {"url": "https://example.com/mcp", "headers": {"Authorization": "Bearer ${MY_TOKEN}"}}}}
+`${NAME}` in a header is replaced by that environment variable, so a token need not be written into the file.
+Remote servers use the Streamable HTTP transport (answers as JSON or as an event stream). Servers that need an
+OAuth login in the browser are not supported: use one that accepts a token header.
 Servers run in the background; their tools are registered as mcp__<server>__<tool> and ALWAYS
 ask for permission before use (the effect is unknown), unless 'always' was chosen.
 """
@@ -20,22 +25,83 @@ from pathlib import Path
 from .i18n import t as tr_
 from . import tools
 
-PROTOCOL = "2024-11-05"
+PROTOCOL = "2024-11-05"            # stdio
+HTTP_PROTOCOL = "2025-03-26"       # Streamable HTTP
+
+
+def _expand(value: str) -> str:
+    """${NAME} -> the environment variable NAME ('' if unset)."""
+    return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", lambda m: os.environ.get(m.group(1), ""), str(value))
+
+
+def _sse_message(resp, want_id) -> dict | None:
+    """Read a text/event-stream body until the JSON-RPC response with id `want_id` has arrived."""
+    data: list[str] = []
+    for raw in resp:
+        line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+        if line.startswith("data:"):
+            data.append(line[5:].lstrip())
+        elif line == "" and data:
+            try:
+                msg = json.loads("\n".join(data))
+            except ValueError:
+                msg = None
+            data = []
+            if isinstance(msg, dict) and msg.get("id") == want_id and "method" not in msg:
+                return msg
+    if data:
+        try:
+            msg = json.loads("\n".join(data))
+            if isinstance(msg, dict) and msg.get("id") == want_id:
+                return msg
+        except ValueError:
+            pass
+    return None
 
 
 @dataclass
 class Server:
     name: str
-    command: str
+    command: str = ""
     args: list = field(default_factory=list)
     env: dict = field(default_factory=dict)
+    url: str = ""                     # set for a remote server (Streamable HTTP); then command is unused
+    headers: dict = field(default_factory=dict)
     status: str = "starting"          # starting | ready | failed
     error: str = ""
     tool_names: list = field(default_factory=list)
     proc: subprocess.Popen | None = None
+    session_id: str | None = None
     _id: int = 0
     _pending: dict = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    # ---------------------------------------------------------------- HTTP transport
+    def _http(self, obj: dict, timeout: float) -> dict | None:
+        """POST one JSON-RPC message. Returns the response message, or None for a notification (HTTP 202)."""
+        import urllib.error
+        import urllib.request
+        headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+                   "MCP-Protocol-Version": HTTP_PROTOCOL, **{k: _expand(v) for k, v in self.headers.items()}}
+        if self.session_id:
+            headers["Mcp-Session-Id"] = self.session_id
+        req = urllib.request.Request(self.url, data=json.dumps(obj).encode(), headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                self.session_id = r.headers.get("Mcp-Session-Id") or self.session_id
+                if r.status == 202 or "id" not in obj:
+                    return None
+                if "text/event-stream" in r.headers.get("Content-Type", ""):
+                    return _sse_message(r, obj["id"]) or {"error": {"message": "the server closed the stream without an answer"}}
+                body = r.read()
+                return json.loads(body) if body.strip() else {"result": {}}
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                raise RuntimeError(f"HTTP {e.code}: the server wants authorization. Add a header in mcp.json, e.g. "
+                                   '"headers": {"Authorization": "Bearer ${MY_TOKEN}"} and set that variable') from None
+            raise RuntimeError(f"HTTP {e.code} from {self.url}") from None
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"cannot reach {self.url}: {e.reason}") from None
 
     # ---------------------------------------------------------------- transport
     def _send(self, obj: dict) -> None:
@@ -67,6 +133,14 @@ class Server:
                 slot["ev"].set()
 
     def request(self, method: str, params: dict | None = None, timeout: float = 30.0) -> dict:
+        if self.url:
+            with self._lock:
+                self._id += 1
+                mid = self._id
+            msg = self._http({"jsonrpc": "2.0", "id": mid, "method": method, "params": params or {}}, timeout) or {}
+            if "error" in msg:
+                raise RuntimeError(msg["error"].get("message", str(msg["error"])))
+            return msg.get("result", {})
         with self._lock:
             self._id += 1
             mid = self._id
@@ -88,6 +162,18 @@ class Server:
 
     # ---------------------------------------------------------------- siklus hidup
     def start(self) -> None:
+        if self.url:
+            try:
+                self.request("initialize", {"protocolVersion": HTTP_PROTOCOL, "capabilities": {},
+                                            "clientInfo": {"name": "emilie", "version": "0.1.0"}}, timeout=20)
+                self._http({"jsonrpc": "2.0", "method": "notifications/initialized"}, 20)
+                for t in self.request("tools/list", timeout=20).get("tools", []):
+                    self._register(t)
+                self.status = "ready"
+            except Exception as e:  # noqa: BLE001
+                self.status, self.error = "failed", f"{type(e).__name__}: {e}"
+                self.stop()
+            return
         try:
             env = {**os.environ, **{k: str(v) for k, v in self.env.items()}}
             cmd = [self.command, *map(str, self.args)]
@@ -175,9 +261,16 @@ def start_all(cwd: str) -> None:
     """Start all servers from the configuration in the background (does not hold up startup)."""
     stop_all()
     for name, cfg in _configs(cwd).items():
-        if not cfg.get("command"):
+        if cfg.get("url") and not cfg.get("command"):
+            srv = Server(name, url=str(cfg["url"]), headers=cfg.get("headers") or {})
+            if str(cfg.get("type", "")).lower() == "sse":          # the older two-endpoint transport
+                srv.status, srv.error = "failed", "the old SSE transport is not supported: use a Streamable HTTP url"
+                SERVERS[name] = srv
+                continue
+        elif cfg.get("command"):
+            srv = Server(name, cfg["command"], cfg.get("args", []), cfg.get("env", {}))
+        else:
             continue
-        srv = Server(name, cfg["command"], cfg.get("args", []), cfg.get("env", {}))
         SERVERS[name] = srv
         threading.Thread(target=srv.start, daemon=True).start()
 

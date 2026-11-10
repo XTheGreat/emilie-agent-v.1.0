@@ -29,12 +29,15 @@ PHASES: list[tuple[str, str]] = [("pahami", N_("Understand")), ("rencana", N_("P
                                  ("cek-mutu", N_("Quality check")), ("rilis", N_("Release")), ("rawat", N_("Maintain"))]
 # The planned skill set per phase. Used to place a skill that does not say which phase it is, and to show what is still missing.
 CATALOG: dict[str, list[str]] = {
-    "pahami": ["ringkas-proyek", "telusuri-bug", "analisis-dependensi"],
-    "rencana": ["rancang-fitur", "rancang-arsitektur", "pecah-tugas"],
-    "bangun": ["buat-fitur", "refaktor", "migrasi-database", "buat-api"],
-    "cek-mutu": ["review-kode", "review-code-boost", "audit-keamanan", "buat-tes", "optimasi-performa"],
-    "rilis": ["siapkan-rilis", "buat-changelog", "buat-commit-pr", "setup-ci-cd"],
-    "rawat": ["debug-produksi", "tulis-dokumentasi", "upgrade-dependensi"],
+    "pahami": ["project-overview", "trace-code", "clarify-requirements", "evaluate-technology", "investigate-bug"],
+    "rencana": ["design-architecture", "design-database", "design-api", "design-ui-ux", "break-down-tasks"],
+    "bangun": ["build-feature", "scaffold-project", "refactor-code", "migrate-code", "integrate-third-party"],
+    "cek-mutu": ["write-tests", "fix-flaky-tests", "load-test", "review-code", "deep-review", "security-audit",
+                 "accessibility-check", "profile-performance"],
+    "rilis": ["prepare-release", "write-changelog", "commit-and-pr", "setup-ci-cd", "containerize-deploy",
+              "emergency-rollback"],
+    "rawat": ["upgrade-dependencies", "pay-down-tech-debt", "setup-monitoring", "debug-production",
+              "write-documentation", "write-adr", "onboard-teammate", "explain-code"],
 }
 PHASE_OF = {skill: ph for ph, names in CATALOG.items() for skill in names}
 _PHASE_ALIAS = {"understand": "pahami", "plan": "rencana", "planning": "rencana", "build": "bangun", "implement": "bangun",
@@ -91,10 +94,14 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
     return meta, m.group(2)
 
 
+BUILTIN = Path(__file__).resolve().parent / "builtin"      # skills that ship with Emilie: builtin/skills/<name>/SKILL.md
+
+
 def _roots(cwd: str) -> list[tuple[Path, str]]:
+    """Earlier wins when names clash: a project's own skill beats yours, which beats the one that ships with Emilie."""
     home, here = Path.home(), Path(cwd)
     return [(here / ".emilie", "project"), (here / ".claude", "project"),
-            (home / ".emilie", "user"), (home / ".claude", "user")]
+            (home / ".emilie", "user"), (home / ".claude", "user"), (BUILTIN, "builtin")]
 
 
 def _slug(s: str) -> str:
@@ -181,8 +188,10 @@ def prompt_section() -> str:
     if not SKILLS:
         return ""
     lines = ["# Available skills",
-             "When a task matches a skill's description, call the use_skill tool to load its full "
-             "instructions before acting. A skill may tell you to load another one: do so."]
+             "If the request matches a skill's description, even partly, your FIRST action must be to call use_skill for "
+             "it, before searching, reading files or answering. A skill holds the procedure, the quality bar and the "
+             "output format the user expects, so do not work from memory when one applies. A skill may tell you to load "
+             "another one: do so. If none matches, carry on normally."]
     if any(s.phase for s in SKILLS.values()):
         lines.append("You work like a senior developer, in phases: " + " -> ".join(f"{lab} ({pid})" for pid, lab in PHASES) +
                      ". Understand before planning, plan before building, verify before releasing. For a task decide which "
@@ -204,6 +213,37 @@ def prompt_section() -> str:
                 return "\n".join(lines)
             lines.append(line)
     return "\n".join(lines)
+
+
+def triggers(s: "Skill") -> list[str]:
+    """The quoted phrases after 'Triggers' in a skill's description, lower-cased: 'Triggers - "trace", "walk me through"'."""
+    tail = re.split(r"\bTriggers?\b", s.description, maxsplit=1)
+    if len(tail) < 2:
+        return []
+    return [p.strip().lower() for p in re.findall(r"[\"“]([^\"”]{2,80})[\"”]", tail[1]) if p.strip()]
+
+
+def matching(text: str) -> list["Skill"]:
+    """Skills whose trigger phrase appears in the user's message (whole words, case-insensitive)."""
+    low = (text or "").lower()
+    out = []
+    for s in SKILLS.values():
+        if any(re.search(r"(?<!\w)" + re.escape(p) + r"(?!\w)", low) for p in triggers(s)):
+            out.append(s)
+    return out
+
+
+def with_hint(text: str) -> str:
+    """Models do not always load a skill on their own. When the message contains a skill's trigger phrase, append a short
+    note so the first action is use_skill. Not applied to slash commands (those load a skill explicitly)."""
+    if not SKILLS or not text or text.lstrip().startswith(("/", "!", "#")) or "<skill " in text:
+        return text
+    hits = matching(text)[:2]
+    if not hits:
+        return text
+    names = ", ".join(f"'{s.name}'" for s in hits)
+    return (f"{text}\n\n<skill-hint>This request matches the skill {names}. Call use_skill for it first and follow it, "
+            "unless it clearly does not apply.</skill-hint>")
 
 
 def _bind(s: "Skill", text: str) -> str:
