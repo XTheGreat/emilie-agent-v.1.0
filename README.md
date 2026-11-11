@@ -54,7 +54,7 @@ Put them in `%USERPROFILE%\.emilie\mcp.json` (or `.mcp.json` in a trusted projec
 ```
 
 Requires Node.js (`winget install OpenJS.NodeJS.LTS`). Check status with `/mcp`; reload with `/mcp reload`.
-Every MCP tool call asks for permission first.
+Every MCP tool call asks for permission first, except in trust mode (Shift+Tab), where MCP tools are allowed. To allow only some, use a rule such as `/allow mcp__playwright__*`.
 
 ## Commands
 

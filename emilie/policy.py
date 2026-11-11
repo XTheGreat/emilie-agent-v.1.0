@@ -264,10 +264,10 @@ class Policy:
             if self.trusted or name in self.always:
                 return "allow", ""
             return "ask", ""
-        if name.startswith("mcp__"):          # external server tool: its effect is unknown -> always ask
+        if name.startswith("mcp__"):          # external server tool: its effect is unknown -> ask, unless the folder is trusted
             if plan:
                 return "deny", tr_('plan mode: MCP tools are blocked')
-            return ("allow", "") if name in self.always else ("ask", "")
+            return ("allow", "") if (self.trusted or name in self.always) else ("ask", "")
         if name == "web_fetch":
             from urllib.parse import urlparse
             if self.trusted or name in self.always:
