@@ -58,7 +58,8 @@ def find_still() -> Path | None:
 
 
 HD_SIDE = 360          # decoded size for the image-protocol (HD) mode
-HD_FPS = 15.0          # PNG per frame, so fewer frames than the half-block mode
+# real kitty sends raw frames through shared memory (cheap) -> 30 fps; other terminals send a PNG per frame -> 15 fps
+HD_FPS = float(paths.env("HD_FPS") or (30.0 if os.environ.get("KITTY_WINDOW_ID") else 15.0))
 
 
 def _fit(img: Image.Image, side: int = DECODE_SIDE) -> Image.Image:

@@ -756,6 +756,10 @@ class TUI:
 
             def hdr(text: str, w: int = 34):
                 """✧･ﾟ: *✧･ﾟ:* judul *:･ﾟ✧*:･ﾟ✧  (every glyph is one cell wide; a shorter pair if the panel is narrow)"""
+                if sys.platform != "win32":      # Linux/macOS: halfwidth katakana / ✧ get a wrong cell width in some fonts and garble the columns -> plain ASCII
+                    side = max(3, (w - len(text) - 2) // 2)
+                    pat = ("=-" * side)[:side]
+                    return [(MUTED, pat + " "), (f"bold {LAV}", text), (MUTED, " " + pat[::-1])]
                 left, right = "✧･ﾟ: *✧･ﾟ:*", "*:･ﾟ✧*:･ﾟ✧"
                 if len(left) + len(right) + len(text) + 2 > w:
                     left, right = "✧･ﾟ:*", "*:･ﾟ✧"
