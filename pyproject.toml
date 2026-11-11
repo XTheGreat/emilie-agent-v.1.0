@@ -17,5 +17,5 @@ include = ["emilie*"]
 namespaces = true      # the skills and locales folders hold data, not code: list them as packages so nothing is dropped
 
 [tool.setuptools.package-data]
-emilie = ["locales/*.json", "builtin/skills/*/SKILL.md", "builtin/skills/*/references/*", "builtin/skills/*/scripts/*",
+emilie = ["locales/*.json", "builtin/persona.md", "builtin/skills/*/SKILL.md", "builtin/skills/*/references/*", "builtin/skills/*/scripts/*",
           "builtin/skills/*/assets/*"]
