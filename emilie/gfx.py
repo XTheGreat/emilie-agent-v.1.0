@@ -57,7 +57,7 @@ DIAC = [
 PLACEHOLDER = "\U0010EEEE"
 Q = "0" if paths.env("GFX_DEBUG") else "2"   # debug: let the terminal answer (errors become visible)
 RING = 4                      # image ids rotate so the picture being shown is never deleted mid-frame
-MAX_PX = 480                  # longest side of the transmitted picture (keeps each PNG small)
+MAX_PX = 320                 # longest side of the transmitted picture (keeps each PNG small)
 
 _live: set[int] = set()
 
@@ -143,13 +143,13 @@ class View:
         self._shm_seq = 0
         # shared memory only for kitty itself (verified in its protocol docs); others get PNG over the tty
         self._shm_ok = bool(os.environ.get("KITTY_WINDOW_ID")) and os.path.isdir("/dev/shm") \
-            and paths.env("GFX_SHM", "1") != "0"
+            and paths.env("GFX_SHM", "0") != "0"
         self.cells = ["".join(PLACEHOLDER + chr(DIAC[r]) + chr(DIAC[c]) for c in range(cols)) for r in range(rows)]
 
     def send(self, rgba: np.ndarray) -> None:
         """Transmit a new picture under the next id; delete the one before the previous (no blank flash)."""
         mode = paths.env("GFX_MODE", "fresh")   # fresh | ring | nodelete (debug)
-        if mode == "fresh":                       # a new id every frame: an id is never deleted and reused right after
+        if mode in ("fresh", "nodelete"):         # a new id every frame: an id is never deleted and reused right after
             i = self.ids[0] + 16 + (self.n % 0x40000)
         else:
             i = self.ids[self.n % RING]
