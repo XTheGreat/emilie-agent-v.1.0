@@ -774,7 +774,7 @@ class TUI:
             ]
             keys = [
                 [(ROSE, "shift+tab"), (MUTED, " mode   "), (ROSE, "@file"), (MUTED, " attach   "), (ROSE, "!cmd"), (MUTED, " shell")],
-                [(ROSE, "ctrl+v/alt+p"), (MUTED, " image   "), (ROSE, "/model"), (MUTED, " model   "), (ROSE, "/skills"), (MUTED, " skills")],
+                [(ROSE, "ctrl+v/alt+p"), (MUTED, " paste   "), (ROSE, "/model"), (MUTED, " model   "), (ROSE, "/skills"), (MUTED, " skills")],
                 [(ROSE, "alt +/-"), (MUTED, " size  "), (ROSE, "f"), (MUTED, " fps  "), (ROSE, "i"), (MUTED, " still  "), (ROSE, "b"), (MUTED, " glow  "), (ROSE, "c"), (MUTED, " camera  "), (ROSE, "v"), (MUTED, " call")],
                 [(ROSE, "ctrl+c"), (MUTED, " stop   "), (ROSE, "pgup/pgdn"), (MUTED, " scroll   "), (ROSE, "/help"), (MUTED, " all")],
             ]
@@ -849,7 +849,7 @@ class TUI:
         else:                                    # narrow terminal: compact banner
             out += [("", " ")] + title + [(MUTED, f"  {st['model']}{mult}")] + [("", "\n")]
             out += [("", " "), (MUTED, "Develop By "), (f"bold {ROSE}", "SecretByEnumb"), ("", "\n")]
-        out += anim.rule_fragments(cols, self._ft())
+        out += anim.rule_fragments(cols, 0.0)       # static (the credit box keeps the animation)
         out.append(("", "\n"))
         from . import mcp as _m, skills as _s
         nt = sum(len(v) for v in info["tools"].values())
@@ -1141,10 +1141,10 @@ class TUI:
         return [("", " ")]
 
     def _rule_frags(self):
-        return anim.rule_fragments(self._cols_rows()[0], self._ft())
+        return anim.rule_fragments(self._cols_rows()[0], 0.0)   # static: input bar border does not animate
 
     def _prompt_frags(self):
-        return [anim.prompt_arrow(self._ft())]
+        return [anim.prompt_arrow(0.0)]
 
     def _input_height(self) -> Dimension:
         cols = max(20, self._cols_rows()[0])
@@ -1795,8 +1795,12 @@ class TUI:
             data = clip.grab_clipboard_image()
             if data:
                 self._add_image(event.current_buffer, data)
+                return
+            text = clip.grab_clipboard_text()         # Ctrl+V pastes text too, same as Ctrl+Shift+V
+            if text:
+                self._on_paste(event.current_buffer, text)
             else:
-                self.flash(tr_("no image in the clipboard (screenshot with Win+Shift+S, then Alt+P)"), 4)
+                self.flash(tr_("the clipboard is empty (copy text, or screenshot with Win+Shift+S, then Alt+P)"), 4)
 
         @kb.add("enter", filter=free)
         def _(event):

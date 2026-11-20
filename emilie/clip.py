@@ -42,6 +42,29 @@ def _run(cmd: list[str]) -> bytes | None:
         return None
 
 
+def grab_clipboard_text() -> str | None:
+    """Text on the system clipboard (wl-paste / xclip / xsel / pbpaste / PowerShell). None if empty or no tool worked."""
+    if os.name == "nt":
+        out = None
+        try:
+            r = subprocess.run(["powershell", "-NoProfile", "-Command", "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-Clipboard -Raw"],
+                               capture_output=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW)
+            out = r.stdout if r.returncode == 0 else None
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    else:
+        out = None
+        for cmd in (["wl-paste", "--no-newline"], ["xclip", "-selection", "clipboard", "-o"], ["xsel", "--clipboard", "--output"], ["pbpaste"]):
+            if shutil.which(cmd[0]):
+                out = _run(cmd)
+                if out:
+                    break
+    if not out:
+        return None
+    text = out.decode("utf-8", "replace")
+    return text if text.strip() else None
+
+
 def grab_clipboard_image() -> bytes | None:
     if os.name == "nt":
         try:

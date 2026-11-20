@@ -43,6 +43,30 @@ Working rules:
   matching mcp__ tool and use it. Also check skills: a listed skill may already describe how to do the job.
 - Never say you lack a capability without checking the tools you actually have; if truly none fits, say which tool or
   MCP server would be needed and how the user can add it (/mcp).
+- MANDATORY RULES for MCP tools (apply only when the tool is in your tool list):
+  1. DOCS FIRST. Before you write or change code that uses an external library or framework (FastAPI, SQLAlchemy,
+     React, Next.js, Django, pandas, Playwright, any pip/npm package), you MUST call the context7 tools first:
+     resolve the library id, then get its docs, and write the code from what the docs say. Your memory of an API can be
+     out of date, so never skip this because you "already know it". Mention in one line that you checked the docs.
+  2. HARD PROBLEMS. For debugging with an unknown cause, a design choice, or a plan of 4+ steps, call the thinking tool
+     before acting.
+  3. REMEMBERING. When the user says "remember / ingat" or states a lasting preference, store it with the memory
+     tools. At the start of a new task, search memory once for relevant preferences or project facts.
+  4. Use the built-in tools (read_file, write_file, edit, glob, grep, bash) for files and commands. MCP tools are for
+     what the built-ins cannot do.
+- Stay inside the working directory {cwd}. Never create files in the home folder or elsewhere. Create only the files the
+  user asked for. Do NOT create a virtualenv (.venv), install packages, start servers or run extra checks unless the
+  user asked for it; if a package is needed, say so and tell the user the install command.
+- Which MCP tool for which job (use them only if they appear in your tool list):
+  * mcp__context7__*: up-to-date docs for a library or framework (see rule 1).
+  * mcp__thinking__*: step-by-step reasoning. Use it for hard debugging, design choices or multi-step plans where a
+    wrong first guess is costly. Skip it for simple tasks.
+  * mcp__memory__*: long-term memory (a knowledge graph). When the user states a lasting preference, fact about a
+    project or person, or asks you to remember something, store it. At the start of a task that may depend on past
+    context, search it first.
+  * mcp__browser__*: a real browser for sites you must interact with (log in, click, fill forms, upload, screenshot).
+    For only reading a page, web_fetch is faster. Take a snapshot of the page before clicking so you use valid targets.
+- When an mcp__ tool fails, read the error, fix the arguments and retry once; if it still fails, tell the user plainly.
 - Make documents with the Office tools above, not by hand-writing XML or a throwaway script; save them in the working
   directory and tell the user the file path.
 - A <file> block is a file the user @-mentioned."""
@@ -689,7 +713,27 @@ class Agent:
         return out
 
     # ------------------------------------------------------------ user message
+    _LIB_RE = re.compile(
+        r"\b(fastapi|flask|django|sqlalchemy|pydantic|pandas|numpy|pytest|celery|react|next\.?js|vue|svelte|angular|"
+        r"express|tailwind|prisma|supabase|langchain|playwright|puppeteer|axios|typescript|vite|webpack|redux|"
+        r"library|framework|package|sdk|latest version|versi terbaru|terbaru)\b", re.I)
+
+    def _docs_hint(self, text: str) -> str:
+        """Small models skip the docs tool even when told to. When the user's message names a library/framework and
+        the context7 server is up, remind the model right inside that message (mandatory, concrete tool names)."""
+        try:
+            from . import mcp as _mcp
+            srv = _mcp.SERVERS.get("context7")
+            if srv is None or srv.status != "ready" or not self._LIB_RE.search(text or ""):
+                return ""
+        except Exception:
+            return ""
+        return ("\n\n[system reminder] This request involves an external library/framework. BEFORE writing any code, "
+                "call mcp__context7__resolve-library-id for it, then mcp__context7__query-docs for the topic, and write "
+                "the code from those docs. Start your reply with one line saying which docs you checked.")
+
     def _user_message(self, text: str, images: list[tuple[str, str]]) -> dict:
+        text = (text or "") + self._docs_hint(text)
         if not images:
             return {"role": "user", "content": text}
         videos = [(m, b) for m, b in images if m.startswith("video/")]
