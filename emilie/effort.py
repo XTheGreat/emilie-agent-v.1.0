@@ -1,6 +1,9 @@
-"""/effort: one lever to limit token usage.
+"""/effort: one lever for how hard Emilie works on a message: how much the model thinks, and how many tokens it may use.
 
 Each level sets all of these at once:
+  thinking       how much a reasoning model thinks before it answers: Claude's own effort parameter (claude.py),
+                 or the provider's thinking switch for OpenAI-compatible models (reasoning.py). Low thinks little or
+                 not at all, medium leaves the model's default, high and max ask for more.
   max_output     limit of answer tokens per model call
   tool_out_chars limit on the length of tool output sent back to the model
   read_lines     default line limit of read_file
@@ -34,16 +37,16 @@ LEVELS: dict[str, Effort] = {
     "low": Effort("low", 1024, 4_000, 150, 6, 12_000,
                   "Answer very briefly (at most 3 sentences). Get straight to the point, no filler. "
                   "Avoid tool calls that are not really needed.",
-                  N_('saver: short answers, small tool output')),
+                  N_('saver: thinks little, short answers, small tool output')),
     "medium": Effort("medium", 4096, 10_000, 500, 15, 40_000,
                      "Answer concisely and to the point; explain only as needed.",
-                     N_('balanced (default)')),
+                     N_("balanced (default): the model's usual thinking")),
     "high": Effort("high", 8192, 20_000, 2000, 30, 90_000,
                    "Work carefully, explain important decisions, and verify the result.",
-                   N_('thorough: looser answer and context limits')),
+                   N_('thorough: thinks longer, looser answer and context limits')),
     "max": Effort("max", 16384, 40_000, 2000, 150, 160_000,
                   "Very thorough: check edge cases and verify by running tests when available.",
-                  N_('no limits: loosest caps, spends tokens freely')),
+                  N_('deepest thinking, loosest caps: spends tokens freely')),
 }
 DEFAULT = "medium"
 

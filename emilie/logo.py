@@ -39,7 +39,8 @@ def find_logo() -> Path | None:
         cands.append(Path(paths.env("LOGO")).expanduser())
     if load_settings().get("logo"):
         cands.append(Path(load_settings()["logo"]).expanduser())
-    files = [p for p in sorted(ASSETS.glob("logo*")) if p.is_file()]
+    video_order = {".webm": 0, ".mov": 1, ".mp4": 2, ".mkv": 3, ".gif": 4}
+    files = [p for p in sorted(ASSETS.glob("logo*"), key=lambda p: video_order.get(p.suffix.lower(), 9)) if p.is_file()]
     cands += [p for p in files if p.suffix.lower() in VIDEO_EXTS]
     cands += [p for p in files if p.suffix.lower() in IMAGE_EXTS]
     for p in cands:

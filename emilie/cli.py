@@ -301,10 +301,7 @@ def make_core(console: Console, argv: list[str], hooks) -> Core:
             agent.run_turn(text, images or [])
         except KeyboardInterrupt:
             stopped = True
-            if agent.salvaged:
-                console.print(tr_("\n[{ERR}]stopped[/] [{MUTED}]· your progress is kept ({0} steps) · say what to do next, or type 'continue'[/]", agent.salvaged, ERR=ERR, MUTED=MUTED))
-            else:
-                console.print(tr_('\n[{ERR}]stopped[/] [{MUTED}]· this turn was removed from history[/]', ERR=ERR, MUTED=MUTED))
+            ui.stopped(console, agent.salvaged)     # the desktop app draws its own quiet "Stopped" (worker.py)
         except QuotaExhausted as q:
             stopped = True
             info = Table.grid(padding=(0, 2))
@@ -322,12 +319,28 @@ def make_core(console: Console, argv: list[str], hooks) -> Core:
             console.print(Panel(info, title=tr_('[bold {ERR}]API quota exhausted[/]', ERR=ERR), title_align="left",
                                 border_style=ERR, padding=(0, 1)))
         except Exception as e:
-            body = f"{type(e).__name__}: {e}"[:800]
+            from rich.markup import escape as _esc
+            from . import ratelimit as _rl
+            code = getattr(e, "status_code", None)               # the provider's own words, not 'Error code: 503 - [{...'
+            body = _esc(f"{type(e).__name__}{f' {code}' if code else ''}: {_rl.describe(e)}"[:800])
             if "timeout" in type(e).__name__.lower() or "timed out" in str(e).lower():
                 from .agent import request_timeout
                 body += "\n" + tr_("the model did not answer within {0}s: it may be overloaded or queueing. Try again, "
                                    "or switch with /model (change the wait with \"timeout\" in ~/.emilie/settings.json).",
                                    int(request_timeout()))
+            elif _rl.classify(e) == "rate":
+                body += "\n" + tr_("the provider kept answering 429 (rate limit) after several minutes of waiting. Free "
+                                   "endpoints such as NVIDIA's slow busy models down even at low use: wait a few minutes "
+                                   "and type 'continue', set a backup with /fallback <model>, or switch with /model.")
+            elif _rl.classify(e) == "quota":
+                body += "\n" + tr_("the provider's quota or daily limit is used up: waiting does not help until it "
+                                   "resets. Switch with /model, or add credit with the provider.")
+            elif _rl.classify(e) == "busy":
+                body += "\n" + tr_("the model is overloaded on the provider's side and stayed busy while Emilie waited. "
+                                   "Try again in a few minutes, or set a backup with /fallback <model> so she switches "
+                                   "by herself.")
+            elif code == 404:
+                body += "\n" + tr_("the provider does not offer this model (any more): pick another one with /model.")
             if agent.salvaged:
                 body += "\n" + tr_("your progress is kept ({0} steps) · /model to switch, then type 'continue'", agent.salvaged)
             console.print(Panel(body, title=tr_('[bold]error[/]'), border_style=ERR, title_align="left"))
@@ -431,7 +444,9 @@ def make_core(console: Console, argv: list[str], hooks) -> Core:
                 from . import claude as _claude
                 cur = int(eff.load_settings().get("thinking") or 0)
                 if PROVIDER != "anthropic":
-                    console.print(tr_('[{MUTED}]extended thinking is a Claude feature: it needs the Anthropic provider (emilie --setup)[/]', MUTED=MUTED))
+                    console.print(tr_('[{MUTED}]how much the model thinks follows /effort (low = little, high / max = more); a token budget for thinking is a feature of older Claude models[/]', MUTED=MUTED))
+                elif _claude.adaptive(agent.active_model):
+                    console.print(tr_('[{MUTED}]{0} thinks adaptively: set how much with /effort (low, medium, high, max). /thinking <tokens> only applies to older Claude models[/]', agent.active_model, MUTED=MUTED))
                 elif not arg:
                     console.print(tr_('[{MUTED}]thinking:[/] {0}  [{MUTED}](/thinking on | off | <tokens, min {1}>)[/]',
                                       f"{cur} tokens" if cur else "off", _claude.MIN_THINKING, MUTED=MUTED))
@@ -1049,6 +1064,9 @@ def main() -> None:
         from . import providers
         providers.setup(rest[0] if rest else None)
         return
+    if argv[:1] in (["app"], ["desktop"]) or "--app" in argv:   # the desktop app (it has its own API key setup)
+        from .desktop.launch import launch
+        sys.exit(launch(argv))
     from . import providers
     if not providers.has_key() and "--banner" not in argv:
         if sys.stdin.isatty():

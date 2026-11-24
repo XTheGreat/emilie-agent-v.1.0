@@ -569,8 +569,8 @@ schema = _schema      # public alias for tools registered at runtime (e.g. the s
 _s = {"type": "string"}
 _i = {"type": "integer"}
 _todo_item = {"type": "object", "properties": {
-    "content": _s, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}},
-    "required": ["content", "status"]}
+    "content": _s, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
+    "activeForm": _s}, "required": ["content", "status"]}
 
 # nama → (fungsi, schema, grup, dangerous-legacy)
 TOOLS = {
@@ -620,7 +620,11 @@ TOOLS = {
                       "promising URL to read the page. Use it for current events, docs, prices, anything you do not know.",
         {"query": _s, "max_results": _i}, ["query"]), "web", False),
     "todo_write": (todo_write, _schema(
-        "todo_write", "Record/update the task list for multi-step work (send the whole list).",
+        "todo_write", "Record/update the task list the user sees as a checklist while you work. Use it BEFORE the first "
+                      "action of any job with 3+ steps (editing several files/cells, a feature, a multi-part request). "
+                      "Send the whole list every time: short imperative items (content), exactly one in_progress, the "
+                      "rest pending; mark an item completed as soon as it is done, not in a batch at the end. Optional "
+                      "activeForm: the present-continuous text shown while the item runs.",
         {"todos": {"type": "array", "items": _todo_item}}, ["todos"]), "plan", False),
 }
 

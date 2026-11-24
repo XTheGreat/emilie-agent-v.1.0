@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import queue
@@ -8,15 +9,17 @@ from datetime import datetime
 from pathlib import Path
 
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
 from .i18n import t as tr_
 from . import claude, clip, context, hooks, session, skills, tools, ui
-from . import companion, language, persona, voice
+from . import companion, diagnostics, language, persona, ratelimit, reasoning, trim, usage_log, voice, workspace
 from .config import API_KEY, BASE_URL, MODEL, PROVIDER, PROVIDER_ID, VISION_MODEL
 from .effort import Effort, load_settings
 from .policy import Policy, WRITE_TOOLS
+from .toolguide import TOOL_GUIDE
 from .stream import StreamView, is_quota_error
 from .theme import ERR, MUTED, ROSE, WARN
 
@@ -44,14 +47,16 @@ Working rules:
 - Never say you lack a capability without checking the tools you actually have; if truly none fits, say which tool or
   MCP server would be needed and how the user can add it (/mcp).
 - MANDATORY RULES for MCP tools (apply only when the tool is in your tool list):
-  1. DOCS FIRST. Before you write or change code that uses an external library or framework (FastAPI, SQLAlchemy,
-     React, Next.js, Django, pandas, Playwright, any pip/npm package), you MUST call the context7 tools first:
-     resolve the library id, then get its docs, and write the code from what the docs say. Your memory of an API can be
-     out of date, so never skip this because you "already know it". Mention in one line that you checked the docs.
+  1. DOCS WHEN IT MATTERS. Before you write or change code that uses an external library or framework (FastAPI,
+     SQLAlchemy, React, Next.js, Django, pandas, Playwright, any pip/npm package), check it with the context7 tools
+     (resolve the library id, then get the docs) when you are not sure of the exact API, the library is new or changes
+     fast, the version matters, or the user asks. Do not look up what you know well (the standard library, everyday
+     basics) or the same library twice in a task. If you checked, say so in one line.
   2. HARD PROBLEMS. For debugging with an unknown cause, a design choice, or a plan of 4+ steps, call the thinking tool
      before acting.
   3. REMEMBERING. When the user says "remember / ingat" or states a lasting preference, store it with the memory
-     tools. At the start of a new task, search memory once for relevant preferences or project facts.
+     tools. Search memory once when the work depends on earlier preferences or project facts (the user refers to
+     something from before, or it is a substantial new task); skip it for quick one-off questions.
   4. Use the built-in tools (read_file, write_file, edit, glob, grep, bash) for files and commands. MCP tools are for
      what the built-ins cannot do.
 - Stay inside the working directory {cwd}. Never create files in the home folder or elsewhere. Create only the files the
@@ -186,15 +191,22 @@ def est_tokens(obj) -> int:
 
 
 class Usage:
-    def __init__(self):
+    def __init__(self, who=None):
         self.inp = self.out = self.calls = 0
         self.exact = True
+        self._who = who                        # () -> (provider id, model): each call is also logged (usage_log.py)
 
-    def add(self, inp: int, out: int, exact: bool) -> None:
+    def add(self, inp: int, out: int, exact: bool, model: str | None = None) -> None:
         self.inp += inp
         self.out += out
         self.calls += 1
         self.exact = self.exact and exact
+        if self._who:
+            try:
+                pid, m = self._who()
+            except Exception:
+                pid, m = PROVIDER_ID, ""
+            usage_log.record(pid, model or m, inp, out, exact)
 
 
 def request_timeout() -> float:
@@ -223,11 +235,15 @@ class Agent:
         self.todos: list[dict] = []
         self.salvaged = 0                      # steps of an interrupted turn that were KEPT (provider error), for the UI
         self._resume_note = ""                 # "provider" | "user": the next message continues a turn that was cut short
-        self.usage = Usage()
+        self.usage = Usage(lambda: (PROVIDER_ID, self.active_model))
         self.checkpoints: list[dict[str, bytes | None]] = []
         self._turn_ckpt: dict[str, bytes | None] = {}
+        self._seen: dict[str, tuple] = {}      # files the model has read (or written whole):
+                                               # {path: (mtime, size, sha1, index of the message that holds the text)}
+        self._broken: set[str] = set()         # files whose last syntax check after a change found an error
         self.session_id, self.created = session.new_id(), time.time()
         self.memory_text, self.memory_files = context.load_memory(os.getcwd())
+        self.workspace = workspace.snapshot(os.getcwd())   # date, git, scripts, layout: taken once (keeps the prompt cached)
         self._usage_opt = True
         self._glance_lock = threading.Lock()   # a camera glance may only write to the history while no user turn runs
         self._turn_active = False
@@ -239,12 +255,17 @@ class Agent:
         self._call_on, self._call_t0, self._call_idx = False, 0.0, 0
         self._quiet_until = 0.0                # the user said bye / brb: she does not start talking before this time
         self.set_effort(effort)
+        self._sub_cancel = threading.Event()   # set when a turn is stopped while sub-agents still run in their threads
+        self._no_reasoning: set[tuple] = set() # (provider, model) that refused the thinking switch (reasoning.py)
+        self._tls = threading.local()          # .sub = True inside a sub-agent's thread
+        # max_retries=0: the SDK's own retry fires within a second, which only collects another 429 from a rate-limited
+        # provider; every call that matters goes through _resilient / _call instead (patient waits, ratelimit.py)
         if PROVIDER == "openai":
             from openai import OpenAI
-            self.client = OpenAI(api_key=API_KEY, base_url=BASE_URL, timeout=request_timeout(), max_retries=1)
+            self.client = OpenAI(api_key=API_KEY, base_url=BASE_URL, timeout=request_timeout(), max_retries=0)
         else:
             import anthropic
-            self.client = anthropic.Anthropic(api_key=API_KEY, timeout=request_timeout(), max_retries=1)
+            self.client = anthropic.Anthropic(api_key=API_KEY, timeout=request_timeout(), max_retries=0)
         tools.register("exit_plan_mode", self.exit_plan_mode, tools.schema(
             "exit_plan_mode", "Plan mode only: present your finished plan to the user for approval. Pass the complete "
                               "plan as markdown (goal, steps, files you will touch). When approved, plan mode ends and "
@@ -319,8 +340,10 @@ class Agent:
         if len(jobs) > self.MAX_PARALLEL:
             return f"ERROR: at most {self.MAX_PARALLEL} jobs at once; send the rest in a second call"
         results: list[str] = [""] * len(jobs)
+        self._sub_cancel.clear()
 
         def work(i: int, j: dict) -> None:
+            self._tls.sub = True                  # a wait for the rate limit in this thread ends when the turn is stopped
             try:
                 results[i] = self.run_subagent(str(j.get("description", f"job {i + 1}")), str(j["prompt"]))
             except BaseException as e:           # one failing job must not lose the others
@@ -329,9 +352,13 @@ class Agent:
         threads = [threading.Thread(target=work, args=(i, j), daemon=True) for i, j in enumerate(jobs)]
         for t in threads:
             t.start()
-        for t in threads:                         # short waits, so Ctrl+C can still get in
-            while t.is_alive():
-                t.join(0.2)
+        try:
+            for t in threads:                     # short waits, so Ctrl+C can still get in
+                while t.is_alive():
+                    t.join(0.2)
+        except BaseException:
+            self._sub_cancel.set()                # stopped: the sub-agents give up instead of waiting and calling on
+            raise
         return "\n\n".join(f"## {j.get('description', f'job {i + 1}')}\n{r}" for i, (j, r) in enumerate(zip(jobs, results)))
 
     def run_subagent(self, description: str, prompt: str) -> str:
@@ -358,8 +385,9 @@ class Agent:
                                                          "parameters": s["input_schema"]}} for s in schemas]
                 msgs = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
                 for _ in range(self.SUB_ROUNDS):
-                    r = self.client.chat.completions.create(model=self.active_model, tools=oa, messages=msgs,
-                                                            max_tokens=self.effort.max_output)
+                    r = self._call(lambda: self.client.chat.completions.create(
+                        model=self.active_model, tools=oa, messages=msgs, max_tokens=self.effort.max_output),
+                        self.active_model)
                     if r.usage:
                         self.usage.add(r.usage.prompt_tokens or 0, r.usage.completion_tokens or 0, True)
                     m = r.choices[0].message
@@ -368,7 +396,9 @@ class Agent:
                         return last_text or "(the sub-agent returned nothing)"
                     msgs.append({"role": "assistant", "content": m.content, "tool_calls": [
                         {"id": c.id, "type": "function",
-                         "function": {"name": c.function.name, "arguments": c.function.arguments or "{}"}}
+                         "function": {"name": c.function.name, "arguments": c.function.arguments or "{}"},
+                         **({"extra_content": (c.model_extra or {})["extra_content"]}
+                            if (getattr(c, "model_extra", None) or {}).get("extra_content") else {})}
                         for c in m.tool_calls]})
                     for c in m.tool_calls:
                         try:
@@ -379,8 +409,9 @@ class Agent:
             else:
                 msgs = [{"role": "user", "content": prompt}]
                 for _ in range(self.SUB_ROUNDS):
-                    r = self.client.messages.create(model=self.active_model, max_tokens=self.effort.max_output,
-                                                    system=system, tools=schemas, messages=msgs)
+                    r = self._call(lambda: self.client.messages.create(
+                        model=self.active_model, max_tokens=self.effort.max_output, system=system, tools=schemas,
+                        messages=msgs), self.active_model)
                     self.usage.add(r.usage.input_tokens, r.usage.output_tokens, True)
                     text = "".join(b.text for b in r.content if b.type == "text")
                     last_text = text or last_text
@@ -404,10 +435,22 @@ class Agent:
         tools.LIMITS["read_lines"] = effort.read_lines
 
     def system_prompt(self) -> str:
-        s = BASE_SYSTEM.format(cwd=os.getcwd(), platform=tools.PLATFORM_NOTE) + "\n\nAnswer style: " + self.effort.style
+        """Stable parts first, parts that change last: a provider that caches the start of the request (Anthropic with
+        cache_control, DeepSeek and others automatically) only reuses it up to the first difference."""
+        from . import mcp as _mcp
+        s = BASE_SYSTEM.format(cwd=os.getcwd(), platform=tools.PLATFORM_NOTE) + TOOL_GUIDE    # how to use each tool well
         ps = persona.section()
         if ps:
             s += "\n\n" + ps
+        sk = skills.prompt_section()
+        if sk:
+            s += "\n\n" + sk
+        s += getattr(self, "workspace", "")
+        if self.memory_text:
+            s += "\n\n# Project memory\n" + self.memory_text
+        # ---- from here on: what changes (MCP servers coming and going, /effort, the mode, language, voice, a call)
+        s += _mcp.inventory()                                                                 # the MCP tools connected now
+        s += "\n\nAnswer style: " + self.effort.style
         if self.policy.mode == "plan":
             s += ("\n\nPLAN MODE IS ACTIVE: do not change files or run commands that write. Investigate with the read "
                   "tools (use the task tool for wide searches), then write a concrete step-by-step plan and call "
@@ -420,11 +463,6 @@ class Agent:
                   "plan with todo_write, then do every item. Keep each tool call small: write big files in parts "
                   "(write_file, then write_file with append=true) so one answer never hits the output limit. "
                   "Stop only when the work is complete or you are truly blocked.")
-        if self.memory_text:
-            s += "\n\n# Project memory\n" + self.memory_text
-        sk = skills.prompt_section()
-        if sk:
-            s += "\n\n" + sk
         ls = language.prompt_section()
         if ls:
             s += "\n\n" + ls
@@ -459,13 +497,25 @@ class Agent:
         n_tools = len(tools.SCHEMAS)
         if getattr(self, "_tl_key", None) != n_tools:
             self._tl, self._tl_key = est_tokens(tools.SCHEMAS), n_tools
-        return est_tokens(self.system_prompt()) + self._hist_stats()[0] + self._tl
+        return est_tokens(self.system_prompt()) + max(0, self._hist_stats()[0] - self._trim_saved() // 4) + self._tl
+
+    def _trim_saved(self) -> int:
+        """Characters of old tool results that are sent as stubs (trim.py), so the gauge counts what is really sent."""
+        st = self.__dict__.get("_trim_state")
+        if not st or not st.get("mark") or load_settings().get("trim_tool_results", True) is False:
+            return 0
+        key = (len(self.messages), id(self.messages[-1]) if self.messages else 0, id(st["mark"]))
+        if key != getattr(self, "_ts_key", None):
+            self._ts, self._ts_key = trim.saved_chars(self.messages, st), key
+        return self._ts
 
     # ------------------------------------------------------------ session
     def reset(self) -> None:
         self.messages, self.todos, self.checkpoints = [], [], []
+        self._seen, self._broken = {}, set()
         self.salvaged, self._resume_note = 0, ""
         self.session_id, self.created = session.new_id(), time.time()
+        self.workspace = workspace.snapshot(os.getcwd())
 
     def save(self) -> None:
         try:
@@ -501,7 +551,8 @@ class Agent:
     def resume(self, data: dict) -> None:
         self.messages = data["messages"]
         self.session_id, self.created = data["id"], data.get("created", time.time())
-        self.todos, self.checkpoints = [], []
+        self.todos, self.checkpoints = self._todos_from_history(self.messages), []
+        self._seen, self._broken = {}, set()          # files may have changed since: read again before overwriting
         self.salvaged, self._resume_note = 0, ""
 
     # ------------------------------------------------------------ undo
@@ -551,6 +602,8 @@ class Agent:
             removed = len(self.messages) - target.mark
             self.messages = self.messages[:target.mark]
             self.todos = []
+            # files read in the part that was cut off are no longer in the chat: they must be read again
+            self._seen = {k: v for k, v in self._seen.items() if v[3] < target.mark}
             self._resume_note = ""
             if not files:
                 for ck in span:                          # the files stay as they are; the chat points are gone
@@ -598,16 +651,21 @@ class Agent:
                 out.append(f"[panggil {tc['function']['name']}] {tc['function']['arguments'][:300]}")
         return "\n".join(out)
 
-    def _complete(self, system: str, user: str, max_tokens: int) -> str:
-        """One-shot model call (no stream, no tools)."""
+    def _complete(self, system: str, user: str, max_tokens: int, patient: bool = False) -> str:
+        """One-shot model call (no stream, no tools). patient=True (compaction) waits out a rate limit the way the
+        conversation does; otherwise (a session title) it is skipped at once while the model is rate-limited, so an
+        extra never adds to the provider's load (ratelimit.CoolingDown)."""
         model = self.model
         if PROVIDER == "openai":
-            r = self.client.chat.completions.create(
+            call = lambda: self.client.chat.completions.create(       # noqa: E731
                 model=model, max_tokens=max_tokens,
                 messages=[{"role": "system", "content": system}, {"role": "user", "content": user}])
+        else:
+            call = lambda: self.client.messages.create(               # noqa: E731
+                model=model, max_tokens=max_tokens, system=system, messages=[{"role": "user", "content": user}])
+        r = self._call(call, model) if patient else self._call_once(call, model)
+        if PROVIDER == "openai":
             return r.choices[0].message.content or ""
-        r = self.client.messages.create(model=model, max_tokens=max_tokens, system=system,
-                                        messages=[{"role": "user", "content": user}])
         return "".join(b.text for b in r.content if b.type == "text")
 
     def compact(self, instructions: str = "", auto: bool = False) -> tuple[int, int] | None:
@@ -620,12 +678,15 @@ class Agent:
             summary = self._complete(
                 COMPACT_SYSTEM,
                 (f"Extra instructions: {instructions}\n\n" if instructions else "") + self._transcript(self.messages[:idx]),
-                800)
+                800, patient=True)
         head = [{"role": "user", "content": f"[Summary of the earlier conversation]\n{summary.strip()}"},
                 {"role": "assistant", "content": "Understood, I will continue from that summary."}]
         self.messages = head + self.messages[idx:]
         for ck in self.checkpoints:                    # message positions changed: the chat can no longer be rewound
             ck.mark = None
+        # files read in the summarised part are gone from the context (read again before overwriting them); the
+        # turns kept intact moved to new positions
+        self._seen = {k: (*v[:3], v[3] - idx + len(head)) for k, v in self._seen.items() if v[3] >= idx}
         after = self.ctx_tokens()
         self.console.print(tr_('[{MUTED}]history compacted{0}: ~{1:.1f}k → ~{2:.1f}k token[/]', ' automatically' if auto else '', before / 1000, after / 1000, MUTED=MUTED))
         self.save()
@@ -636,10 +697,52 @@ class Agent:
         return models.context_window(self.active_model, load_settings().get("context_limit"))
 
     def compact_limit(self) -> int:
-        """Where the history is summarised: the effort level's limit, but never above 70% of this model's window
-        (a small model would otherwise overflow long before the 'max' level's 160k)."""
+        """Where the history is summarised: the user's /config compact_at, else the effort level's limit, but never
+        above 70% of this model's window (a small model would otherwise overflow long before the 'max' level's 160k)."""
         ctx = self.model_context()
-        return min(self.effort.compact_at, int(ctx * 0.7)) if ctx else self.effort.compact_at
+        try:
+            at = int(load_settings().get("compact_at") or 0) or self.effort.compact_at
+        except (TypeError, ValueError):
+            at = self.effort.compact_at
+        return min(at, int(ctx * 0.7)) if ctx else at
+
+    def _outgoing(self) -> list:
+        """The history as it is sent to the model: old tool results trimmed (trim.py); the stored history stays whole."""
+        if load_settings().get("trim_tool_results", True) is False:
+            return self.messages
+        st = self.__dict__.setdefault("_trim_state", {})
+        return trim.slim(self.messages, st)
+
+    def ctx_breakdown(self) -> dict:
+        """What fills the context, by kind (estimates), for the desktop app's Context panel. The parts add up to
+        ctx_tokens(): the system prompt is split into its skills list, project memory and MCP tool list, and the tool
+        definitions into built-in and MCP ones (per server)."""
+        from . import mcp as _mcp
+        sys_t = est_tokens(self.system_prompt())
+        sk = skills.prompt_section()
+        skills_t = est_tokens("\n\n" + sk) if sk else 0
+        mem_t = est_tokens("\n\n# Project memory\n" + self.memory_text) if self.memory_text else 0
+        inv = _mcp.inventory()
+        inv_t = est_tokens(inv) if inv else 0
+        key = len(tools.SCHEMAS)
+        if getattr(self, "_tb_key", None) != key:            # tool schemas change only when MCP servers come and go
+            builtin, servers = 0, {}
+            for s in tools.SCHEMAS:
+                name = str(s.get("name", ""))
+                if name.startswith("mcp__"):
+                    srv = name.split("__")[1] if name.count("__") >= 2 else "mcp"
+                    d = servers.setdefault(srv, {"name": srv, "tools": 0, "tokens": 0})
+                    d["tools"] += 1
+                    d["tokens"] += est_tokens(s)
+                else:
+                    builtin += est_tokens(s)
+            self._tb, self._tb_key = (builtin, sorted(servers.values(), key=lambda d: -d["tokens"])), key
+        builtin, servers = self._tb
+        return {"messages": self._hist_stats()[0], "system_tools": builtin,
+                "mcp_tools": sum(d["tokens"] for d in servers) + inv_t, "skills": skills_t, "memory": mem_t,
+                "system_prompt": max(0, sys_t - skills_t - mem_t - inv_t),
+                "mcp_servers": [dict(d) for d in servers], "window": self.model_context(),
+                "compact_default": self.effort.compact_at}
 
     def out_limit(self) -> int:
         """Max answer tokens: the effort level's, but at most a quarter of a small model's window."""
@@ -657,6 +760,106 @@ class Agent:
             except Exception as e:  # failing to summarise is not the same as failing to work
                 self.console.print(tr_('[{WARN}]automatic compaction failed: {e}[/]', WARN=WARN, e=e))
 
+    # ------------------------------------------------------------ safe edits: overwrite guard + syntax check
+    SYNTAX_TOOLS = ("write_file", "edit_file")       # their file is parsed right after the change (diagnostics.py)
+
+    @staticmethod
+    def _fkey(path) -> str:
+        try:
+            return os.path.normcase(str(Path(str(path)).expanduser().resolve()))
+        except (OSError, RuntimeError, ValueError):
+            return os.path.normcase(os.path.abspath(str(path)))
+
+    @staticmethod
+    def _fstamp(p: Path) -> tuple | None:
+        """(mtime, size, sha1) of a file as the model saw it. The hash lets a file that was only touched (saved again
+        unchanged, checked out) still count as seen."""
+        try:
+            st = p.stat()
+            digest = hashlib.sha1(p.read_bytes()).hexdigest() if st.st_size <= 4_000_000 else None
+        except OSError:
+            return None
+        return st.st_mtime_ns, st.st_size, digest
+
+    def _mark_seen(self, path, only_if_known: bool = False) -> None:
+        """The model now knows this file's current text (read_file, an @-mention, or it wrote the whole file).
+        only_if_known: just refresh a file it had already seen (after its own edit or append)."""
+        key = self._fkey(path)
+        if only_if_known and key not in self._seen:
+            return
+        st = self._fstamp(Path(str(path)).expanduser())
+        if st:                                       # the text sits in the message about to be added (tool result)
+            self._seen[key] = (*st, len(self.messages))
+        else:
+            self._seen.pop(key, None)
+
+    def _seen_state(self, p: Path) -> str:
+        """'fresh' (read and unchanged since), 'stale' (changed on disk since it was read) or 'unseen'."""
+        key = self._fkey(p)
+        old = self._seen.get(key)
+        if old is None:
+            return "unseen"
+        try:
+            st = p.stat()
+        except OSError:
+            return "unseen"
+        if (st.st_mtime_ns, st.st_size) == old[:2]:
+            return "fresh"
+        if st.st_size == old[1] and old[2] is not None:
+            cur = self._fstamp(p)
+            if cur and cur[2] == old[2]:
+                self._seen[key] = (*cur, old[3])
+                return "fresh"
+        return "stale"
+
+    def _overwrite_refusal(self, name: str, args: dict) -> tuple[str, str] | None:
+        """write_file over an existing file the model has not read in this conversation, or one that changed on disk
+        since it read it (the user edited it meanwhile, a formatter ran): refused, so nothing is replaced unseen. The
+        model is told to read the file first. -> (tool result, short reason for the user) or None. Appending, a new
+        file and an empty file are always allowed: nothing can be lost."""
+        if name != "write_file" or args.get("append") or not args.get("path") \
+                or load_settings().get("overwrite_guard") is False:
+            return None
+        p = Path(str(args["path"])).expanduser()
+        try:
+            if not p.is_file() or p.stat().st_size == 0:
+                return None
+        except OSError:
+            return None
+        state = self._seen_state(p)
+        if state == "fresh":
+            return None
+        if state == "unseen":
+            return (f"ERROR: {p} already exists and you have not read it in this conversation, so write_file would "
+                    "replace content you have never seen. Read it with read_file first (or change only the part you "
+                    "need with edit_file), then write it.", tr_("the file exists and has not been read yet"))
+        return (f"ERROR: {p} was changed on disk after you last read it (by the user, a formatter or a command), so "
+                "write_file would throw those changes away. Read it again with read_file, then write it.",
+                tr_("the file changed on disk since it was read"))
+
+    def _after_file_tool(self, name: str, args: dict, out: str, check: bool, before: str | None) -> str:
+        """After a tool ran: remember which files the model has seen, and parse a file it just changed. A syntax error
+        goes back in the same tool result (diagnostics.report), so the model fixes it before its next step."""
+        path = args.get("path") if isinstance(args, dict) else None
+        if name not in ("read_file", "write_file", "edit_file") or not path or out.startswith(("ERROR", "BLOCKED")):
+            return out
+        try:
+            if name == "read_file":
+                self._mark_seen(path)
+            else:                                    # a whole new text is known; an edit or append only refreshes
+                self._mark_seen(path, only_if_known=name == "edit_file" or bool(args.get("append")))
+            if check:
+                key = self._fkey(path)
+                note, broken = diagnostics.report(path, before, key in self._broken)
+                if broken:
+                    self._broken.add(key)
+                else:
+                    self._broken.discard(key)
+                out += note
+        except Exception:                            # bookkeeping must never fail a change that was made
+            pass
+        return out
+
     # ------------------------------------------------------------ eksekusi tool
     def _exec(self, name: str, args: dict) -> str:
         if name not in tools.TOOLS:
@@ -665,6 +868,10 @@ class Agent:
         if decision == "deny":
             ui.denied(self.console, name, reason)
             return f"BLOCKED: {reason}. Do not repeat it; continue with the plan or ask the user."
+        refused = self._overwrite_refusal(name, args)
+        if refused:                              # before the permission question: a write that cannot happen needs no OK
+            ui.denied(self.console, name, refused[1])
+            return refused[0]
         asked = decision == "ask"
         if asked:
             ans = ui.ask_permission(self.console, name, args, reason)
@@ -687,6 +894,9 @@ class Agent:
             self._checkpoint(args.get("path", ""))
             if name == "notebook_run" and args.get("output_path"):
                 self._checkpoint(args["output_path"])
+        check = (name in self.SYNTAX_TOOLS and load_settings().get("syntax_check") is not False
+                 and diagnostics.checkable(args.get("path", "")))
+        before = diagnostics.read_before(args.get("path", "")) if check else None   # to tell a new error from an old one
         t_tool = time.time()
         tui = getattr(self.console, "tui", None)
         if tui is not None:
@@ -698,12 +908,16 @@ class Agent:
         finally:
             if tui is not None:
                 tui.mark_running(False)          # stop blinking (finished / failed / stopped)
-        ui.tool_result(self.console, name, out, time.time() - t_tool)
+        dt = time.time() - t_tool
+        out = self._after_file_tool(name, args, out, check, before)
+        ui.tool_result(self.console, name, out, dt)
         if preview is not None and not out.startswith("ERROR"):
-            ui.print_preview(self.console, name, args)
+            ui.print_preview(self.console, name, args, preview)
         if name == "todo_write" and not out.startswith("ERROR"):
             self.todos = args.get("todos", [])
             ui.print_todos(self.console, self.todos)
+        elif not out.startswith(("ERROR", "BLOCKED")):
+            out += self._todo_reminder()
         feedback, warns = hooks.post(name, args, out)
         for w in warns:
             self.console.print(f"[{WARN}]{w}[/]", markup=True, highlight=False)
@@ -711,6 +925,47 @@ class Agent:
             self.console.print(tr_('[{MUTED}]hook feedback sent to the model[/]', MUTED=MUTED))
             out += "\n\n[hook feedback]\n" + feedback
         return out
+
+    TODO_NUDGE_AFTER = 3     # tool calls in one turn without a task list before the model is reminded to write one
+
+    def _todo_reminder(self) -> str:
+        """Like Claude Code's TodoWrite reminder: many models skip the task list and just start calling tools, so the
+        user never sees the list of circles. After a few tool calls in a turn with no open list, remind once."""
+        self._turn_tools = getattr(self, "_turn_tools", 0) + 1
+        if getattr(self, "_todo_nudged", False) or self._turn_tools < self.TODO_NUDGE_AFTER:
+            return ""
+        if getattr(self.policy, "mode", "") == "plan":
+            return ""
+        if any(isinstance(t, dict) and t.get("status") != "completed" for t in self.todos):
+            return ""                       # a list is already open and being worked through
+        self._todo_nudged = True
+        return ("\n\n<system-reminder>This task has several steps but there is no task list. Call todo_write now with "
+                "the whole plan (short imperative items, the current one in_progress, the rest pending), then keep it "
+                "updated: mark each item completed as soon as it is done. Do not mention this reminder.</system-reminder>")
+
+    @staticmethod
+    def _todos_from_history(messages: list) -> list[dict]:
+        """The last task list the model wrote, so a resumed session shows its list again."""
+        for m in reversed(messages or []):
+            calls = []
+            for tc in m.get("tool_calls") or []:
+                f = tc.get("function", {}) if isinstance(tc, dict) else {}
+                calls.append((f.get("name"), f.get("arguments")))
+            c = m.get("content")
+            if isinstance(c, list):
+                calls += [(p.get("name"), p.get("input")) for p in c if isinstance(p, dict) and p.get("type") == "tool_use"]
+            for name, a in reversed(calls):
+                if name != "todo_write":
+                    continue
+                if isinstance(a, str):
+                    try:
+                        a = json.loads(a)
+                    except ValueError:
+                        continue
+                todos = a.get("todos") if isinstance(a, dict) else None
+                if isinstance(todos, list):
+                    return [t for t in todos if isinstance(t, dict)]
+        return []
 
     # ------------------------------------------------------------ user message
     _LIB_RE = re.compile(
@@ -766,9 +1021,19 @@ class Agent:
                 self._quiet_until = self._user_at + wait
                 self._user_at += wait
         try:
+            self._await_mcp()
             self._run_turn(user_text, images)
         finally:
             self._turn_active = False
+
+    def _await_mcp(self) -> None:
+        """MCP servers start in the background (npx can take a while). Never send a request before their tools are
+        listed, or the model believes it lacks them (it once said it had no browser while one was starting)."""
+        from . import mcp as _mcp
+        if not any(s.status == "starting" for s in _mcp.SERVERS.values()):
+            return
+        with self.console.status(tr_('[{MUTED}]connecting tools…[/]', MUTED=MUTED), spinner="dots"):
+            _mcp.wait_ready(30)
 
     # ------------------------------------------------------------ video call: she speaks first
     def _ends_clean(self) -> bool:
@@ -838,19 +1103,29 @@ class Agent:
         return system
 
     def _ask_model(self, system: str, user: dict, max_out: int) -> str:
-        """One non-streaming call without tools (text of the reply). Counts the tokens; quota errors are raised."""
+        """One non-streaming call without tools (text of the reply). Counts the tokens; quota errors are raised.
+        While the model is rate-limited it returns "" (she stays quiet) instead of calling: a camera glance or a goodbye
+        is never worth a 429, and a 429 here only records the cool-down for the conversation's next request."""
         model = VISION_MODEL or self.model
-        if PROVIDER == "openai":
-            r = self.client.chat.completions.create(
-                model=model, max_tokens=max_out, messages=[{"role": "system", "content": system}, user])
-            text = (r.choices[0].message.content or "") if r.choices else ""
-            u = getattr(r, "usage", None)
-            inp, out = (getattr(u, "prompt_tokens", 0) or 0, getattr(u, "completion_tokens", 0) or 0) if u else (0, 0)
-        else:
-            r = self.client.messages.create(model=model, max_tokens=max_out // 2, system=system, messages=[user])
-            text = "".join(b.text for b in r.content if b.type == "text")
-            inp, out = r.usage.input_tokens, r.usage.output_tokens
-        self.usage.add(inp, out, bool(inp or out))
+        try:
+            if PROVIDER == "openai":
+                r = self._call_once(lambda: self.client.chat.completions.create(
+                    model=model, max_tokens=max_out, messages=[{"role": "system", "content": system}, user]), model)
+                text = (r.choices[0].message.content or "") if r.choices else ""
+                u = getattr(r, "usage", None)
+                inp, out = (getattr(u, "prompt_tokens", 0) or 0, getattr(u, "completion_tokens", 0) or 0) if u else (0, 0)
+            else:
+                r = self._call_once(lambda: self.client.messages.create(
+                    model=model, max_tokens=max_out // 2, system=system, messages=[user]), model)
+                text = "".join(b.text for b in r.content if b.type == "text")
+                inp, out = r.usage.input_tokens, r.usage.output_tokens
+        except ratelimit.CoolingDown:
+            return ""
+        except Exception as e:
+            if ratelimit.classify(e) == "rate":
+                return ""
+            raise
+        self.usage.add(inp, out, bool(inp or out), model=model)
         if is_quota_error(text):
             raise QuotaExhausted(text)
         return text
@@ -999,6 +1274,8 @@ class Agent:
         images = images or []
         mark = len(self.messages)
         self._turn_ckpt = Ckpt(user_text, mark)
+        for m in re.finditer(r'<file path="([^"]+)">', user_text or ""):   # @-mentioned: the text is in the message
+            self._mark_seen(m.group(1))
         if images:
             if VISION_MODEL and VISION_MODEL != self.model:
                 self.console.print(tr_('[{MUTED}]image attached → using vision model: {VISION_MODEL}[/]', MUTED=MUTED, VISION_MODEL=VISION_MODEL))
@@ -1012,6 +1289,8 @@ class Agent:
             self._reunion = ""
         self.salvaged = 0
         self._auto_n = self._auto_q = self._auto_t = 0     # automatic "keep going" nudges used in this turn
+        self._empty_n = self._cut_n = 0                    # nudges after an empty / cut-off reply in this turn
+        self._turn_tools, self._todo_nudged = 0, False     # task-list reminder (see _todo_reminder)
         user_text = skills.with_hint(user_text)            # a matching skill is suggested for the first action
         self.messages.append(self._user_message(user_text, images))
         self._drop_old_video()
@@ -1126,7 +1405,39 @@ class Agent:
                 "completely finished (all files written, then run or check it), then give a short summary."
                 f"{left} If everything is really finished, mark the todos completed with todo_write and just summarise.")
 
+    EMPTY_MAX, CUT_MAX = 3, 1
+
+    def _silent_end(self, text: str, fin: str | None) -> str | None:
+        """The model's reply ended with NOTHING in it (no text, no tool call), or the stream stopped without a finish
+        reason (the connection was cut): that is not the end of the job, whatever the provider calls it. Returns the
+        message that makes it carry on (a few times per turn), or None, after saying why the turn stopped."""
+        empty = not (text or "").strip()
+        cut = fin is None and getattr(self, "_fin_seen", False)   # a provider that never sends one is left alone
+        if not (empty or cut):
+            return None
+        if empty:
+            ms = self.messages
+            if ms and ms[-1].get("role") == "assistant" and not ms[-1].get("tool_calls") and not self._tool_ids(ms[-1]):
+                ms.pop()                          # an empty assistant message is refused by providers when replayed
+            n, cap = self._empty_n, self.EMPTY_MAX
+            why = tr_("the model sent an empty reply")
+        else:
+            n, cap = self._cut_n, self.CUT_MAX
+            why = tr_("the connection ended before the answer was finished")
+        if n >= cap:
+            if empty or n:
+                self.console.print(tr_("[{WARN}]Stopped: {0} ({1} times in a row). Type 'continue' to go on.[/]", why, n, WARN=WARN))
+            return None
+        if empty:
+            self._empty_n = n + 1
+        else:
+            self._cut_n = n + 1
+        self.console.print(tr_("[{MUTED}]{0}: continuing automatically ({1}/{2})...[/]", why, n + 1, cap, MUTED=MUTED))
+        return ("(auto) Your last reply was empty or was cut off. Continue the job from where it stands: do the next step, "
+                "or, if everything is really finished, give a short summary.")
+
     def _after_text(self, text: str, truncated: bool) -> None:
+        voice.VOICE.sync()          # the spoken reply's text is on screen before tool output / notes that follow it
         if truncated:
             self.console.print(tr_('[{WARN}]answer cut off by the effort limit {0} ({1} tokens). Use /effort to raise it[/]', self.effort.name, self.effort.max_output, WARN=WARN))
 
@@ -1177,77 +1488,147 @@ class Agent:
         finally:
             stop.set()
 
-    # ------------------------------------------------------------ retry + fallback model
-    RETRY_DELAYS = (2.0, 6.0)          # seconds before retry 1 and 2 (the setting "retries" can lower the count)
-    _TRANSIENT_NAMES = ("timeout", "connection", "ratelimit", "internalserver", "overloaded", "serviceunavailable")
-    _TRANSIENT_TEXT = re.compile(r"overload|rate.?limit|temporar|try again|capacity|too many requests|"
-                                 r"service unavailable|bad gateway|gateway time", re.I)
-
-    @classmethod
-    def _is_transient(cls, e: BaseException) -> bool:
-        """A failure that may well go away by itself (busy server, rate limit, network blip), unlike a wrong key or
-        a malformed request, which retrying cannot fix."""
-        code = getattr(e, "status_code", None)
-        if isinstance(code, int):
-            return code in (408, 409, 425, 429, 500, 502, 503, 504, 529)
-        if any(n in type(e).__name__.lower() for n in cls._TRANSIENT_NAMES):
-            return True
-        return bool(cls._TRANSIENT_TEXT.search(str(e)))
+    # ------------------------------------------------------------ rate limits, retries, fallback model (ratelimit.py)
+    def _retries(self) -> int:
+        """How often a rate-limited / busy call is tried again (settings.json "retries", /config retries)."""
+        try:
+            return max(0, min(10, int(load_settings().get("retries", ratelimit.DEFAULT_RETRIES))))
+        except (TypeError, ValueError):
+            return ratelimit.DEFAULT_RETRIES
 
     @staticmethod
-    def _retry_after(e: BaseException) -> float | None:
+    def _provider_name() -> str:
+        return usage_log._label(PROVIDER_ID or PROVIDER)
+
+    def _sleep(self, seconds: float) -> None:
+        """Wait in short steps, so Ctrl+C and the desktop's stop button still get in. In a sub-agent's thread the wait
+        ends (KeyboardInterrupt) once its turn was stopped, so it does not keep waiting and calling on its own."""
+        end = time.monotonic() + max(0.0, seconds)
+        while True:
+            if getattr(self._tls, "sub", False) and self._sub_cancel.is_set():
+                raise KeyboardInterrupt
+            left = end - time.monotonic()
+            if left <= 0:
+                return
+            time.sleep(min(0.2, left))
+
+    def _before_call(self, model: str, announced: bool = False) -> None:
+        """Sit out this model's shared cool-down and pacing gap (another session or sub-agent may have hit the limit).
+        announced: the retry line just printed already explains the wait."""
+        wait = ratelimit.wait_needed(ratelimit.key(PROVIDER_ID, model))
+        if wait >= 5 and not announced:
+            self.console.print(tr_('[{MUTED}] {0} is rate-limiting {1}: waiting {2:.0f}s before the next request[/]',
+                                   self._provider_name(), escape(model), wait, MUTED=MUTED))
+        self._sleep(wait)
+
+    def _should_retry(self, e: BaseException, attempt: int, retries: int, model: str) -> bool:
+        """After a call failed before any answer arrived: True when another try is worth it. Its wait becomes the
+        model's cool-down (shared with the other sessions), so the next _before_call sits it out. False to give up:
+        not a passing failure, the tries are used up, or the provider asks for a wait of many minutes (a daily cap)."""
+        kind = ratelimit.classify(e)
+        if kind not in ("rate", "busy", "timeout"):
+            return False
+        limit = min(2, retries) if kind == "timeout" else retries     # a timeout already took minutes
+        wait, asked = ratelimit.retry_wait(attempt, e)
+        if attempt >= limit or (asked is not None and asked > ratelimit.GIVE_UP_AFTER):
+            return False
+        if kind == "timeout":
+            self._sleep(wait)
+        else:
+            ratelimit.note_limited(ratelimit.key(PROVIDER_ID, model), wait, rate=kind == "rate")
+        if kind == "rate":
+            self.console.print(tr_('[{MUTED}] {0} is rate-limiting {1} (429): trying again in {2:.0f}s ({3}/{4})[/]',
+                                   self._provider_name(), escape(model), wait, attempt + 1, limit, MUTED=MUTED))
+        else:                                    # "Google Gemini 503: This model is currently experiencing high demand..."
+            code = getattr(e, "status_code", None)
+            self.console.print(tr_('[{MUTED}] {0}: {1} - trying again in {2:.0f}s ({3}/{4})[/]',
+                                   f"{self._provider_name()} {code}" if code else type(e).__name__,
+                                   escape(ratelimit.describe(e)[:120]), wait, attempt + 1, limit, MUTED=MUTED))
+        return True
+
+    def _call(self, fn, model: str):
+        """A non-streaming model call with the conversation's patience (sub-agents, compaction): it waits for the
+        model's cool-down and tries a rate-limited / busy call again with growing waits."""
+        retries, attempt, announced = self._retries(), 0, False
+        while True:
+            self._before_call(model, announced)
+            try:
+                r = fn()
+            except BaseException as e:
+                if self._should_retry(e, attempt, retries, model):
+                    attempt, announced = attempt + 1, True
+                    continue
+                raise
+            ratelimit.note_ok(ratelimit.key(PROVIDER_ID, model))
+            return r
+
+    def _call_once(self, fn, model: str):
+        """An optional call (a session title, a camera glance): it never waits or retries. While the model is
+        rate-limited it is skipped (ratelimit.CoolingDown); a 429 it gets is recorded for the calls that matter."""
+        k = ratelimit.key(PROVIDER_ID, model)
+        left = ratelimit.cooldown_left(k)
+        if left > 0:
+            raise ratelimit.CoolingDown(f"{model} is rate-limited for {left:.0f}s more")
         try:
-            v = e.response.headers.get("retry-after")
-            return float(v) if v else None
-        except Exception:
-            return None
+            r = fn()
+        except Exception as e:
+            kind = ratelimit.classify(e)
+            if kind in ("rate", "busy"):
+                ratelimit.note_limited(k, ratelimit.retry_wait(0, e)[0], rate=kind == "rate")
+            raise
+        ratelimit.note_ok(k)
+        return r
 
     def _resilient(self, make_iter):
-        """_pump with recovery: when the request fails BEFORE any answer arrived (busy server, rate limit, timeout),
-        wait and retry; if it keeps failing and a fallback model is set (/fallback), switch to it. A failure in the
+        """_pump with patience: each request first waits for its model's shared cool-down and pacing (ratelimit.py);
+        when it fails BEFORE any answer arrived (rate limit, busy server, timeout) it is tried again after growing
+        waits, and if it keeps failing and a fallback model is set (/fallback), that model takes over. A failure in the
         middle of an answer is not retried (the progress is kept by _salvage instead)."""
-        cfg = load_settings()
-        delays = self.RETRY_DELAYS[:max(0, int(cfg.get("retries", len(self.RETRY_DELAYS))))]
-        fallback = cfg.get("fallback_model") or None
-        attempt, switched = 0, False
+        retries, fallback = self._retries(), load_settings().get("fallback_model") or None
+        attempt, switched, announced = 0, False, False
         while True:
+            model = self.active_model
+            self._before_call(model, announced)
             got = False
             try:
                 for item in self._pump(make_iter):
                     got = True
                     yield item
+                ratelimit.note_ok(ratelimit.key(PROVIDER_ID, model))
                 return
             except GeneratorExit:
                 raise
             except BaseException as e:
-                if got or isinstance(e, (KeyboardInterrupt, SystemExit)) or not self._is_transient(e):
+                if got:
                     raise
-                # a timeout already cost the whole wait (minutes): try once more at most, then move on
-                limit = min(1, len(delays)) if "timeout" in type(e).__name__.lower() else len(delays)
-                if attempt < limit:
-                    wait = min(30.0, self._retry_after(e) or delays[attempt])
-                    attempt += 1
-                    self.console.print(tr_('[{WARN}]{0}: {1} - retrying in {2:.0f}s ({3}/{4})[/]', type(e).__name__,
-                                           str(e)[:70], wait, attempt, limit, WARN=WARN))
-                    end = time.monotonic() + wait
-                    while time.monotonic() < end:           # short sleeps so Ctrl+C still works
-                        time.sleep(0.2)
+                if self._should_retry(e, attempt, retries, model):
+                    attempt, announced = attempt + 1, True
                     continue
-                if fallback and not switched and fallback != self.model:
+                if fallback and not switched and fallback != self.model and ratelimit.classify(e) is not None:
                     self.console.print(tr_('[{WARN}]{0} keeps failing: switching to the fallback model {1} for this session '
                                            '(/model to change)[/]', self.model, fallback, WARN=WARN))
-                    self.model, switched, attempt = fallback, True, 0
+                    self.model, switched, attempt, announced = fallback, True, 0, False
                     continue
                 raise
 
     # ------------------------------------------------------------ Anthropic
     def _anthropic_events(self):
         """Generator for _pump: ("text", str) deltas, then ("final", message)."""
-        kw = claude.request_kwargs(self.system_prompt(), tools.SCHEMAS, self.messages, self.out_limit(),
-                                   BASE_URL, int(load_settings().get("thinking") or 0))
-        with self.client.messages.stream(model=self.active_model, **kw) as stream:
-            for text in stream.text_stream:
-                yield ("text", text)
+        model = self.active_model
+        kw = claude.request_kwargs(self.system_prompt(), tools.SCHEMAS, self._outgoing(), self.out_limit(),
+                                   BASE_URL, int(load_settings().get("thinking") or 0), model=model,
+                                   effort=self.effort.name)              # current models: effort = thinking depth
+        with self.client.messages.stream(model=model, **kw) as stream:
+            name, args = "", ""
+            for ev in stream:
+                t = getattr(ev, "type", "")
+                if t == "text":
+                    yield ("text", ev.text)
+                elif t == "content_block_start" and getattr(ev.content_block, "type", "") == "tool_use":
+                    name, args = ev.content_block.name, ""
+                elif t == "input_json":                     # a tool call's input arriving piece by piece
+                    args += ev.partial_json
+                    yield ("tool_draft", (name, args, ev.partial_json))
             yield ("final", stream.get_final_message())
 
     def _loop_anthropic(self) -> None:
@@ -1260,6 +1641,9 @@ class Agent:
                 for kind, val in self._resilient(self._anthropic_events):
                     if kind == "text":
                         view.text(val)
+                    elif kind == "tool_draft":
+                        view.think(val[2])
+                        view.tool_draft(val[0], val[1])
                     else:
                         resp = val
             except BaseException:
@@ -1276,8 +1660,9 @@ class Agent:
             if not calls and is_quota_error("".join(b.text for b in resp.content if b.type == "text")):
                 raise QuotaExhausted("".join(b.text for b in resp.content if b.type == "text"))
             if not calls:
-                nudge = self._autocontinue("".join(b.text for b in resp.content if b.type == "text"),
-                                           resp.stop_reason == "max_tokens")
+                _txt = "".join(b.text for b in resp.content if b.type == "text")
+                nudge = self._autocontinue(_txt, resp.stop_reason == "max_tokens") or (
+                    None if resp.stop_reason == "max_tokens" else self._silent_end(_txt, "stop"))
                 if nudge:
                     self.console.print(tr_('[{MUTED}]continuing automatically...[/]', MUTED=MUTED))
                     self.messages.append({"role": "user", "content": nudge})
@@ -1295,16 +1680,40 @@ class Agent:
 
     # ------------------------------------------------------------ OpenAI-compatible
     def _open_stream(self, oa_tools: list[dict]):
-        kw = dict(model=self.active_model, tools=oa_tools, stream=True, max_tokens=self.out_limit(),
-                  messages=[{"role": "system", "content": self.system_prompt()}] + self.messages)
-        if self._usage_opt:
+        """Start the streamed request. Two optional extras are dropped when the provider refuses them (400): the usage
+        report (stream_options) and the thinking switch for the effort level (reasoning.py), which a model that cannot
+        reason rejects; such a model is then left alone for the rest of the session."""
+        model = self.active_model
+        no_think = (PROVIDER_ID, model) in self._no_reasoning
+        extra, room = ({}, 0) if no_think else reasoning.openai_extra(PROVIDER_ID, model, self.effort.name)
+        base = self.out_limit()
+        suspect = False                      # the extras were dropped after a 400 that did not name them
+        while True:
+            kw = dict(model=model, tools=oa_tools, stream=True, max_tokens=max(base, room) if extra else base,
+                      messages=[{"role": "system", "content": self.system_prompt()}] + reasoning.for_request(self._outgoing(), PROVIDER_ID, model))
+            if extra:
+                kw["extra_body"] = extra
+            if self._usage_opt:
+                kw["stream_options"] = {"include_usage": True}
             try:
-                return self.client.chat.completions.create(stream_options={"include_usage": True}, **kw)
-            except Exception as e:  # the provider does not support stream_options -> turn it off, try again
-                if "stream_options" not in str(e) and getattr(e, "status_code", 0) != 400:
+                stream = self.client.chat.completions.create(**kw)
+            except Exception as e:
+                code = getattr(e, "status_code", 0)
+                if code not in (400, 422) and not (self._usage_opt and "stream_options" in str(e)):
                     raise
-                self._usage_opt = False
-        return self.client.chat.completions.create(**kw)
+                if extra and reasoning.rejected(e):           # it says so: no thinking switch for this model
+                    self._no_reasoning.add((PROVIDER_ID, model))
+                    extra = {}
+                elif self._usage_opt:                         # the provider does not support stream_options
+                    self._usage_opt = False
+                elif extra:                                   # last suspect: try once without the thinking switch
+                    extra, suspect = {}, True
+                else:
+                    raise
+                continue
+            if suspect:
+                self._no_reasoning.add((PROVIDER_ID, model))
+            return stream
 
     def _loop_openai(self) -> None:
         oa_tools = [{"type": "function", "function": {
@@ -1315,6 +1724,7 @@ class Agent:
             rounds += 1
             view = StreamView(self.console).start()
             content, calls, fin, usage = "", {}, None, None
+            thought = ""
             in_est = self.ctx_tokens()
             try:
                 for chunk in self._resilient(lambda: self._open_stream(oa_tools)):
@@ -1327,6 +1737,7 @@ class Agent:
                     d = ch.delta
                     rc = getattr(d, "reasoning_content", None) or (d.model_extra or {}).get("reasoning_content")
                     if rc:
+                        thought += rc
                         view.think(rc)  # the model is "thinking": the spinner keeps running
                     if d.content:
                         content += d.content
@@ -1335,10 +1746,15 @@ class Agent:
                         c = calls.setdefault(tc.index, {"id": "", "name": "", "args": ""})
                         if tc.id:
                             c["id"] = tc.id
+                        # Gemini (OpenAI-compat) signs each thinking turn; it must be echoed back on the tool call
+                        xc = (getattr(tc, "model_extra", None) or {}).get("extra_content") or getattr(tc, "extra_content", None)
+                        if xc:
+                            c["extra"] = xc
                         if tc.function:
                             c["name"] += tc.function.name or ""
                             c["args"] += tc.function.arguments or ""
                             view.think(tc.function.arguments or "")
+                            view.tool_draft(c["name"], c["args"])
             except BaseException:
                 view.abort()
                 raise
@@ -1352,14 +1768,19 @@ class Agent:
             msg: dict = {"role": "assistant", "content": content or None}
             if calls:
                 msg["tool_calls"] = [{"id": c["id"], "type": "function",
-                                      "function": {"name": c["name"], "arguments": c["args"] or "{}"}}
+                                      "function": {"name": c["name"], "arguments": c["args"] or "{}"},
+                                      **({"extra_content": c["extra"]} if c.get("extra") else {})}
                                      for c in calls.values()]
+            if calls and thought:
+                msg["reasoning_content"] = thought      # sent back only to the models that require it (reasoning.for_request)
             self.messages.append(msg)
+            if fin:
+                self._fin_seen = True
             self._after_text(content, fin == "length")
             if not calls and is_quota_error(content or ""):
                 raise QuotaExhausted(content)      # -> run_turn cleans the history
             if not calls:
-                nudge = self._autocontinue(content or "", fin == "length")
+                nudge = self._autocontinue(content or "", fin == "length") or (None if fin == "length" else self._silent_end(content or "", fin))
                 if nudge:
                     self.console.print(tr_('[{MUTED}]continuing automatically...[/]', MUTED=MUTED))
                     self.messages.append({"role": "user", "content": nudge})

@@ -10,6 +10,7 @@ from rich.console import Console, Group
 from rich.panel import Panel
 from rich.text import Text
 
+from . import diagnostics
 from .i18n import t as tr_, N_
 from .theme import ADD, DEL, ERR, LAV, MUTED, OK, ROSE, WARN
 
@@ -103,6 +104,9 @@ def tool_result(console: Console, name: str, out: str, dt: float | None = None) 
     style = ERR if err else MUTED
     for i, l in enumerate(summary):
         console.print(Text(("  ⎿ " if i == 0 else "    ") + _one_line(l, 140), style=style))
+    head = diagnostics.headline(out) if name in {"write_file", "edit_file"} and not err else None
+    if head:                                      # the syntax check right after the change (diagnostics.py)
+        console.print(Text("    " + _one_line(head, 140), style=OK if head.startswith("✓") else WARN))
 
 
 def make_preview(name: str, args: dict) -> Text | None:
@@ -141,8 +145,10 @@ def make_preview(name: str, args: dict) -> Text | None:
     return t if diff else None
 
 
-def print_preview(console: Console, name: str, args: dict) -> None:
-    pv = make_preview(name, args)
+def print_preview(console: Console, name: str, args: dict, pv: Text | None = None) -> None:
+    """The diff of a change. Pass the preview made BEFORE the tool ran: made afterwards, the file already holds the
+    change, so a write shows no diff at all and an edit whose new text contains the old one shows it applied twice."""
+    pv = pv if pv is not None else make_preview(name, args)
     if pv:
         console.print(Panel(pv, border_style=MUTED, padding=(0, 1)))
 
@@ -248,6 +254,21 @@ def ask_permission(console: Console, name: str, args: dict, reason: str) -> str:
 
 def denied(console: Console, name: str, reason: str) -> None:
     console.print(Text(tr_('⊘ {0} blocked — {reason}', label(name), reason=reason), style=WARN))
+
+
+def stopped_detail(kept: int) -> str:
+    """What became of a turn the user stopped: its finished steps are kept, or (nothing done yet) it is gone."""
+    return (tr_("your progress is kept ({0} steps) · say what to do next, or type 'continue'", kept) if kept
+            else tr_("this turn was removed from history"))
+
+
+def stopped(console: Console, kept: int) -> None:
+    """The user stopped the turn (Ctrl+C / Esc / the stop button). The desktop app shows it its own way, as Claude does:
+    a quiet grey "Stopped" (worker.py replaces this function)."""
+    if kept:
+        console.print(tr_("\n[{ERR}]stopped[/] [{MUTED}]· your progress is kept ({0} steps) · say what to do next, or type 'continue'[/]", kept, ERR=ERR, MUTED=MUTED))
+    else:
+        console.print(tr_('\n[{ERR}]stopped[/] [{MUTED}]· this turn was removed from history[/]', ERR=ERR, MUTED=MUTED))
 
 
 def print_todos(console: Console, todos: list[dict]) -> None:

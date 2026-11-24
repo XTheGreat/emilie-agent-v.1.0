@@ -27,9 +27,11 @@ PRESETS: dict[str, dict] = {
                    "env": "NVIDIA_API_KEY"},
     "deepseek":   {"label": "DeepSeek", "kind": "openai", "base": "https://api.deepseek.com/v1",
                    "model": "deepseek-chat", "hint": "platform.deepseek.com", "env": "DEEPSEEK_API_KEY"},
+    # Google's alias for its newest Flash model: a pinned name goes stale (gemini-2.5-flash now answers 404 "no longer
+    # available to new users"), the alias moves on with Google
     "gemini":     {"label": N_('Google Gemini'), "kind": "openai",
                    "base": "https://generativelanguage.googleapis.com/v1beta/openai/",
-                   "model": "gemini-2.5-flash", "hint": "aistudio.google.com/apikey", "env": "GEMINI_API_KEY"},
+                   "model": "gemini-flash-latest", "hint": "aistudio.google.com/apikey", "env": "GEMINI_API_KEY"},
     "groq":       {"label": "Groq", "kind": "openai", "base": "https://api.groq.com/openai/v1",
                    "model": "llama-3.3-70b-versatile", "hint": "console.groq.com/keys", "env": "GROQ_API_KEY"},
     "bankai":     {"label": "Bankai", "kind": "openai", "base": "https://bankai.web.id/api",
@@ -69,8 +71,11 @@ def save_provider(pid: str, key: str | None = None, base: str | None = None, mod
         json.dump(keys, f, indent=2)
     os.chmod(KEYS, 0o600)
     st = _read(SETTINGS)
+    # Another provider (model names differ) or a model given here: that provider's saved / default model applies.
+    # Saving the same provider again, e.g. with a new key, keeps the model picked with /model.
+    if st.get("provider") != pid or model:
+        st.pop("model", None)
     st["provider"] = pid
-    st.pop("model", None)                    # model names differ per provider: back to that provider's default
     SETTINGS.write_text(json.dumps(st, indent=2))
 
 

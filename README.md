@@ -25,6 +25,22 @@ emilie
 The first run asks which provider to use and for your API key (stored in `%USERPROFILE%\.emilie\keys.json`).
 Change it later with `emilie --setup`.
 
+## Desktop app
+
+The same Emilie in a window that works like the Claude Code desktop app: sessions in a sidebar grouped by folder,
+streaming answers, tool calls with diffs, permission cards, plan approval, a task list, `/` commands and `@` files,
+a model / effort / mode picker, Files, Terminal, Browser and Changes panes, and a full Settings page.
+It needs Node.js once, for the window (`winget install OpenJS.NodeJS.LTS`):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install-desktop.ps1
+```
+
+Then open **Emilie** from the Start menu or the desktop shortcut, or run `emilie app`
+(`emilie app --browser` opens the same interface in your browser, no Node.js needed).
+Every slash command, skill, MCP server and setting of the terminal version works there too; both share
+`%USERPROFILE%\.emilie`. How it is built and how to extend it: [docs/DESKTOP.md](docs/DESKTOP.md).
+
 ### Manual install
 
 ```powershell
@@ -76,6 +92,42 @@ Project instructions go in `EMILIE.md`; skills in `.emilie\skills\`.
 | `/schedule` | Run a prompt on a timer with the Windows Task Scheduler (read-only unless you pass `--trust`) |
 | `/cost` | Token usage; set `/config price_in` and `price_out` (USD per 1M tokens) for a cost estimate |
 | `emilie -p "prompt"` | One non-interactive turn for scripts; `--trust` allows edits, exit code 2 = something was denied |
+
+## Safe edits
+
+Every time Emilie writes or edits a file, its syntax is checked at once. If her change broke the file, the error and
+the lines around it come back to her in the same step, so she fixes it before going on instead of finding out later
+from a failing build (you see it too, as a `⚠` line under the tool call):
+
+| File | Checked with |
+|---|---|
+| Python | Python's own compiler (`.py`, `.pyi`) |
+| JSON | strict JSON; comments and trailing commas are accepted where the reading tool allows them (`tsconfig.json`, `.vscode\*.json`, `*.jsonc`, ...) |
+| TOML, XML, SVG | built in |
+| JavaScript, TypeScript, JSX/TSX | the project's own TypeScript from `node_modules` (or a global one); without it `node --check` for `.js` |
+| PowerShell | the PowerShell parser |
+| YAML | PyYAML, when installed (`pip install pyyaml`) |
+| Shell scripts | `bash -n` (Linux/macOS) |
+
+Only the syntax is checked: nothing is run and types are not checked. An error that was already in the file before her
+change is mentioned once, briefly. `write_file` also refuses to replace an existing file she has not read in this
+conversation, or one that changed on disk since she read it (you edited it meanwhile), so your work is never
+overwritten unseen. Turn them off with `/config syntax_check off` and `/config overwrite_guard off`.
+
+## Rate limits (429)
+
+Free and shared endpoints (NVIDIA build.nvidia.com, OpenRouter's free models, Groq) answer `429 Too Many Requests`
+when you go over your limit, and on a busy model even when you use it lightly. Emilie waits instead of failing:
+
+- every rate-limited or busy request is tried again up to 6 times (`/config retries 0-10`), waiting what the provider
+  asks for (`Retry-After`, `x-ratelimit-reset`) or else 5, 10, 20, 40, 60, 60 seconds, so up to about 3 minutes;
+- all sessions on your computer (each desktop session, the terminal, sub-agents) share one cool-down per model, kept
+  in `%USERPROFILE%\.emilie\ratelimit.json`: after a 429 none of them calls that model until the wait is over;
+- after a 429 her requests to that model are spaced a few seconds apart for a while, then she speeds up again;
+- session titles and video-call remarks are skipped while the model is rate-limited.
+
+If the provider still refuses after that, your progress is kept: type `continue` later, set `/fallback <model>` so she
+switches by herself, or pick another model with `/model`. A used-up quota or daily limit is reported at once.
 
 ## Notebook and Office tools
 

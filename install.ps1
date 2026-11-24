@@ -35,8 +35,9 @@ if (-not (Test-Path $vpy)) {        # re-running the installer must not rebuild 
 if ((Resolve-Path $root).Path -ne (Resolve-Path $src -ErrorAction SilentlyContinue).Path) {
     if (Test-Path $src) { Remove-Item -Recurse -Force $src }
     New-Item -ItemType Directory -Force -Path $src | Out-Null
-    Get-ChildItem -Force $root | Where-Object { $_.Name -notin @(".git", ".venv", "__pycache__", ".env") } |
-        Copy-Item -Recurse -Force -Destination $src
+    # robocopy skips folders by name at any depth: desktop\node_modules (hundreds of MB) is never copied
+    robocopy $root $src /E /XD .git .venv __pycache__ node_modules /XF .env /NFL /NDL /NJH /NJS /NP | Out-Null
+    if ($LASTEXITCODE -ge 8) { Write-Host "copying the sources failed" -ForegroundColor Red; exit 1 }
 }
 # editable install of the private copy: the code reads assets\ (logo) next to the package folder, so it must run from $src
 Write-Host "Installing Emilie and its dependencies (first time takes a minute)..."

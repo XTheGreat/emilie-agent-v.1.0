@@ -221,7 +221,15 @@ class Server:
             res = self.request("tools/call", {"name": tool_name, "arguments": args}, timeout=120)
             parts = []
             for c in res.get("content", []):
-                parts.append(c.get("text", "") if c.get("type") == "text" else f"[{c.get('type', 'data')}]")
+                kind = c.get("type")
+                if kind == "text":
+                    parts.append(c.get("text", ""))
+                elif kind == "image" and c.get("data"):
+                    # a screenshot or picture: keep it (the model sees it next, the app shows it) instead of dropping it
+                    saved = _save_image(self.name, c["data"], c.get("mimeType") or "image/png")
+                    parts.append(f"[image saved: {saved}]" if saved else "[image]")
+                else:
+                    parts.append(f"[{kind or 'data'}]")
             out = "\n".join(p for p in parts if p) or "(empty)"
             return ("ERROR: " + out) if res.get("isError") else out
         return call
@@ -245,9 +253,72 @@ class Server:
 
 SERVERS: dict[str, Server] = {}
 
+_IMG_EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}
+
+
+def _save_image(server: str, data_b64: str, mime: str) -> str | None:
+    """An image an MCP tool returned (e.g. a browser screenshot): saved in ~/.emilie/images and queued so the model
+    SEES it after this round of tool calls (like read_file on a picture). Returns the file path, or None."""
+    import base64
+    try:
+        raw = base64.b64decode(data_b64)
+        paths.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+        safe = re.sub(r"[^A-Za-z0-9_-]", "_", server)[:24]
+        p = paths.IMAGES_DIR / f"{safe}-{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns() % 1000000:06d}{_IMG_EXT.get(mime.lower(), '.png')}"
+        p.write_bytes(raw)
+    except Exception:  # noqa: BLE001 - a broken image must not break the tool call
+        return None
+    tools.PENDING_IMAGES.append(str(p))
+    return str(p)
+
+
+# What each well-known server is for, so the model knows when to reach for it (used by inventory()).
+PURPOSE = {
+    "browser": "a real web browser: open pages, click, type, fill forms, upload files, take screenshots",
+    "playwright": "a real web browser: open pages, click, type, fill forms, upload files, take screenshots",
+    "chrome-devtools": "debug a web page in Chrome: console errors, network requests, performance traces, screenshots",
+    "context7": "up-to-date documentation and code examples for libraries and frameworks",
+    "thinking": "step-by-step reasoning for hard problems and plans",
+    "memory": "long-term memory (a knowledge graph of facts and preferences)",
+    "deepwiki": "documentation and answers about any public GitHub repository",
+    "github": "GitHub: repositories, issues, pull requests, code search",
+}
+
+
+def wait_ready(timeout: float = 30.0) -> list[str]:
+    """Wait up to `timeout` seconds for servers that are still starting. Returns the names still starting."""
+    end = time.time() + timeout
+    while time.time() < end:
+        if not any(s.status == "starting" for s in SERVERS.values()):
+            return []
+        time.sleep(0.25)
+    return [s.name for s in SERVERS.values() if s.status == "starting"]
+
+
+def inventory() -> str:
+    """For the system prompt, every request: the MCP servers connected right now and their exact tool names, so the
+    model knows what it can do (it once told the user it had no browser while the browser server was connected)."""
+    if not SERVERS:
+        return ""
+    lines = ["", "", "# MCP tools connected right now",
+             "These are real tools in your tool list; call them by these exact names. Check this list before telling the "
+             "user you cannot do something (open or test a web page, take a screenshot, look up docs, remember things)."]
+    for s in SERVERS.values():
+        purpose = PURPOSE.get(s.name.lower(), "")
+        head = f"- {s.name}" + (f" ({purpose})" if purpose else "")
+        if s.status == "ready" and s.tool_names:
+            names = ", ".join(s.tool_names[:12]) + (f" … ({len(s.tool_names)} tools in all)" if len(s.tool_names) > 12 else "")
+            lines.append(f"{head}: {names}")
+        elif s.status == "starting":
+            lines.append(f"{head}: still starting, its tools appear in a moment. Do not tell the user it is missing.")
+        elif s.status == "failed":
+            lines.append(f"{head}: failed to start ({(s.error or 'unknown error')[:140]}). If the user needs it, say so.")
+    return "\n".join(lines)
+
 
 def _configs(cwd: str) -> dict[str, dict]:
-    out: dict[str, dict] = {}
+    from . import plugins
+    out: dict[str, dict] = dict(plugins.mcp_configs())          # plugins first: your own mcp.json wins on a clash
     for f in (paths.HOME_DIR / "mcp.json", Path(cwd) / ".mcp.json"):
         try:
             data = json.loads(f.read_text())
@@ -273,6 +344,25 @@ def start_all(cwd: str) -> None:
             continue
         SERVERS[name] = srv
         threading.Thread(target=srv.start, daemon=True).start()
+
+
+def reconnect(name: str, cwd: str) -> bool:
+    """Stop one server and start it again from the configuration (the rest stay as they are). False: not configured."""
+    cfg = _configs(cwd).get(name)
+    old = SERVERS.pop(name, None)
+    if old:
+        old.stop()
+    if not cfg:
+        return False
+    if cfg.get("url") and not cfg.get("command"):
+        srv = Server(name, url=str(cfg["url"]), headers=cfg.get("headers") or {})
+    elif cfg.get("command"):
+        srv = Server(name, cfg["command"], cfg.get("args", []), cfg.get("env", {}))
+    else:
+        return False
+    SERVERS[name] = srv
+    threading.Thread(target=srv.start, daemon=True).start()
+    return True
 
 
 def stop_all() -> None:

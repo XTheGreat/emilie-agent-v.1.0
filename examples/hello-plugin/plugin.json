@@ -1,0 +1,6 @@
+{
+  "name": "hello-plugin",
+  "version": "1.0.0",
+  "description": "Contoh plugin: satu skill dan satu command untuk mencoba sistem plugin Emilie.",
+  "author": { "name": "Kamu" }
+}

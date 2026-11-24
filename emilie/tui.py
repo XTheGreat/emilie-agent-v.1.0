@@ -57,7 +57,8 @@ from . import anim, clip, logo, ui
 from . import talk, trust, voice
 from .inputbox import (LONG_CHARS, LONG_LINES, PH_END, PH_IMG, PH_TEXT, MentionCompleter, SlashCompleter,
                        Submission, steady_output)
-from .theme import ERR, LAV, MUTED, ROSE, WARN, flow_hex
+from .theme import ERR, LAV, MUTED, ROSE, WARN, flow_hex, gradient_hex
+from .stream import FRAMES, FRAME_FPS
 
 ptfast.install()
 
@@ -278,6 +279,8 @@ class TUI:
         self.busy = False
         self._running = None
         self.live = None                         # the StreamView that is running (spinner + text tail)
+        self._act_key: tuple = ()
+        self._act_lines: list = []
         self.overlay: dict | None = None         # picker (model/session)
         self.perm: dict | None = None            # permission prompt waiting for a key
         self.cc_at = 0.0
@@ -675,6 +678,7 @@ class TUI:
             return False
         now = time.monotonic() if now is None else now
         return (not self.busy and self.overlay is None and self.perm is None and self.cam is None
+                and not voice.VOICE.speaking()
                 and now - self.last_act > CALM_SECS)
 
     def touch(self) -> None:
@@ -889,7 +893,7 @@ class TUI:
     # ================================================================ conversation
     def _tail_text(self) -> str:
         lv = self.live
-        if lv is not None and lv.buf.strip():
+        if lv is not None and lv.buf.strip() and not voice.VOICE.voice_text():
             return re.sub(r"</?say>", "", "\n".join(lv.buf.splitlines()[-40:]), flags=re.I)
         return ""
 
@@ -972,10 +976,19 @@ class TUI:
                 self._banner_cache, self._banner_tick, self._banner_cols = self._build_banner(), tick, cols
                 self._banner_full = to_lines(self._banner_cache)                    # with click handlers
                 self._banner_lines = [[(i[0], i[1]) for i in ln] for ln in self._banner_full]
-        key = (bkey, self._tail_key, self._banner_tick, self._banner_cols)
+        # --- activity line (spinner / replying / speaking): directly under the last message, like Claude Code ---
+        act = self._activity_frags()
+        act_key = tuple((x[0], x[1]) for x in act)
+        if act_key != self._act_key:
+            if act:
+                self._act_lines = ([[]] if self._tail_lines else []) + [[("", " "), *act]]
+            else:
+                self._act_lines = []
+            self._act_key = act_key
+        key = (bkey, self._tail_key, self._banner_tick, self._banner_cols, act_key)
         if key != self._lines_key:
             nb = len(self._banner_lines)
-            self._lines = self._banner_lines + self._body + self._tail_lines
+            self._lines = self._banner_lines + self._body + self._tail_lines + self._act_lines
             self._blink_idx = {nb + i for i in self._body_blink}
             self._lines_key = key
         self._total = len(self._lines)
@@ -1053,7 +1066,9 @@ class TUI:
         if not smooth or self._tau <= 0.001:          # no easing: move exactly the lines asked, right now, nothing queued
             self._tgt = None
             new = max(0, min(mx, self._top_line() + n))
-            self.scroll, self.follow = new, new >= mx
+            # only scrolling DOWN (or nothing to scroll) may re-attach to the bottom: while the reply streams the
+            # content height changes every frame, and an upward scroll must never snap back
+            self.scroll, self.follow = new, new >= mx and (n > 0 or mx == 0)
             self._invalidate()
             return
         top = self._top_line()
@@ -1062,6 +1077,7 @@ class TUI:
         # never let the target run more than one screen ahead of what is shown: a burst of events must not queue up
         # a long glide that keeps scrolling after the fingers stopped
         self._tgt = max(0, min(mx, base + n, top + vh) if n > 0 else max(base + n, top - vh))
+        self._tgt_bottom = n > 0 and self._tgt >= mx      # only a downward scroll that reaches the end re-follows
         if self.follow and self._tgt < mx:        # leave "follow" now, but stay on the same line (no jump)
             self.scroll, self.follow = self._top_line(), False
         self._scroll_ev.set()
@@ -1110,7 +1126,7 @@ class TUI:
                     pos = float(tgt)
                     if self._tgt == want:                      # no new wheel input arrived meanwhile
                         self._tgt = None
-                        if tgt >= mx:
+                        if tgt >= mx and getattr(self, "_tgt_bottom", False):
                             self.follow = True
                 line = int(round(pos))
                 if line != self.scroll or self._tgt is None:
@@ -1131,11 +1147,13 @@ class TUI:
         if self.perm is not None:
             return [("", " ")] + self.perm["frags"]
         if self.live is not None:
-            return [("", " ")] + self.live.status_fragments()
+            return [("", " ")]                    # the spinner is drawn under the last message (_activity_frags)
+        if voice.VOICE.phase():
+            return [("", " ")]
         if time.monotonic() - self.cc_at < CC_WINDOW:
             return [("", " "), ("bold #d99a2b", tr_('press Ctrl+C again to exit'))]
         if self.busy:
-            return [("", " "), (MUTED, tr_('working… (Ctrl+C stops)'))]
+            return [("", " ")]
         if talk.TALK.on:
             st = talk.TALK.state
             txt, col = {"hearing": (tr_('(o_o) hearing you…'), f"bold {ROSE}"),
@@ -1143,6 +1161,33 @@ class TUI:
                         "paused": ("(^_^) …", MUTED)}.get(st, (tr_('(o_o) listening… just talk, pause to send'), f"bold {ROSE}"))
             return [("", " "), (col, txt), (MUTED, tr_('   · /talk off to stop'))]
         return [("", " ")]
+
+    def _activity_frags(self) -> list:
+        """What the agent is doing right now (spinner, replying/speaking, working), shown under the last message."""
+        if self.perm is not None:
+            return []
+        if self.live is not None:
+            return list(self.live.status_fragments())
+        ph = voice.VOICE.phase()
+        if ph:
+            return self._voice_status(ph)
+        if self.busy:
+            return [(MUTED, tr_('working… (Ctrl+C stops)'))]
+        return []
+
+    def _voice_status(self, ph: str):
+        """Same blooming spinner as while she writes, so the line is never empty while the voice catches up."""
+        el = time.time()
+        col = gradient_hex(-el * 0.22)
+        frame = FRAMES[int(el * FRAME_FPS) % len(FRAMES)]
+        if ph == "speaking":
+            bars = "\u2581\u2582\u2583\u2584\u2585\u2586\u2585\u2584\u2583\u2582"
+            k = int(el * 10)
+            wave = "".join(bars[(k + i * 3) % len(bars)] for i in range(6))
+            return [(f"bold {col}", frame + " "), (col, tr_("speaking") + " "), (f"bold {col}", wave),
+                    (MUTED, tr_("  (ctrl+c to stop)"))]
+        dots = "." * (int(el * 3) % 4)
+        return [(f"bold {col}", frame + " "), (col, tr_("replying") + dots), (MUTED, tr_("  (ctrl+c to stop)"))]
 
     def _rule_frags(self):
         return anim.rule_fragments(self._cols_rows()[0], 0.0)   # static: input bar border does not animate
@@ -1588,7 +1633,8 @@ class TUI:
             if self.app is not None:
                 ptfast.trim_renderer_caches(self.app)
             anim_on = self.sprite is not None and self.sprite.animating and self.banner_visible()
-            moving = anim_on or self.busy or self.overlay is not None or self.perm is not None or self.cam is not None
+            moving = (anim_on or self.busy or self.overlay is not None or self.perm is not None or self.cam is not None
+                      or voice.VOICE.speaking())
             self._cam_watchdog()
             time.sleep(1 / self.fps if moving else (0.25 if self.borders_anim else 0.5))
             self._invalidate()

@@ -20,6 +20,19 @@ VERBS = ["Cooking", "Tangling", "Baking", "Whisking", "Simmering", "Pondering",
 # All are single-width characters (no emoji, no ambiguous-width ones, so nothing shifts in any terminal).
 FRAMES = ["∘", "✢", "✥", "✤", "❀", "✿", "✾", "❁", "❋", "❁", "✾", "✿", "❀", "✤", "✥", "✢"]
 FRAME_FPS = 8                                                       # a full bloom-and-close takes 2 s
+# While the model is writing a file (write_file / edit_file ...) the flower is replaced by a pencil that writes a
+# line of handwriting from left to right, lifts, and starts again. Same colour as the flower, fixed width (6 cells).
+WRITE_TOOLS = ("write_file", "edit_file", "notebook_edit", "docx_create", "docx_edit", "xlsx_write")
+_SCRIBBLE = "~∿~∿~∿"                                    # the ink the pencil leaves behind
+PENCIL_FPS = 10
+
+
+def pencil_frame(el: float) -> str:
+    """One frame of the writing pencil: ink grows behind the tip as it moves right; a short pause, then again."""
+    n = len(_SCRIBBLE)
+    k = int(el * PENCIL_FPS) % (n + 3)            # n steps of writing + 3 steps with the pencil at rest
+    k = min(k, n)
+    return _SCRIBBLE[:k] + "✎" + " " * (n - k)
 
 
 def fmt_tokens(n: float) -> str:
@@ -55,6 +68,10 @@ class StreamView:
         self.swallow = False          # True -> this text is a provider error, it is not printed
         self.live: Live | None = None
         self.tui = None
+        self.drafting: str | None = None    # tool whose arguments are being written right now (pencil instead of flower)
+
+    def glyph(self, el: float) -> str:
+        return (pencil_frame(el) + " ") if self.drafting in WRITE_TOOLS else FRAMES[int(el * FRAME_FPS) % len(FRAMES)] + " "
 
     def start(self) -> "StreamView":
         self.t0 = time.time()
@@ -72,8 +89,14 @@ class StreamView:
     def think(self, text: str) -> None:
         self.tokens += len(text) / 4  # estimasi kasar: ~4 char per token
 
+    def tool_draft(self, name: str, args_so_far: str) -> None:
+        """The model is still writing a tool call (e.g. a whole file for write_file). The terminal swaps the flower
+        for a writing pencil; the desktop view overrides this to show what is being written."""
+        self.drafting = name
+
     def text(self, text: str) -> None:
         self.think(text)
+        self.drafting = None
         self.buf += text
         if not self.swallow and is_quota_error(self.buf):
             self.swallow = True
@@ -93,8 +116,15 @@ class StreamView:
         while (i := self._block_end()) is not None:
             block, self.buf = self.buf[:i], self.buf[i:].lstrip("\n")
             if block.strip():
-                self.console.print(Markdown(voice.VOICE.handle(block)))
+                self._emit(block, gap=True)
+
+    def _emit(self, raw: str, gap: bool = False) -> None:
+        """Print a finished block; with the voice on it appears as the voice starts saying it."""
+        def show(shown: str) -> None:
+            self.console.print(Markdown(shown))
+            if gap:
                 self.console.print()
+        voice.VOICE.present(raw, show)
 
     def _render(self):
         el = time.time() - self.t0
@@ -102,11 +132,11 @@ class StreamView:
             return Text("")
         line = Text()
         col = gradient_hex(-el * 0.22)            # the colour changes slowly
-        line.append(FRAMES[int(el * FRAME_FPS) % len(FRAMES)] + " ", style=f"bold {col}")
+        line.append(self.glyph(el), style=f"bold {col}")
         line.append(self.verbs[int(el / 2.5) % len(self.verbs)] + "…", style=col)
         line.append(tr_(' ({0} · ↓ {1} tokens · ctrl+c to stop)', fmt_time(el), fmt_tokens(self.tokens)),
                     style=MUTED)
-        if self.swallow or not self.buf.strip():
+        if self.swallow or not self.buf.strip() or voice.VOICE.voice_text():
             return line
         keep = max(3, self.console.height - 6)
         tail = "\n".join(self.buf.splitlines()[-keep:])
@@ -119,7 +149,7 @@ class StreamView:
         if el < SHOW_DELAY:
             return []                       # give it time first; if the answer is quick there is no need for "cooking…"
         col = gradient_hex(-el * 0.22)
-        return [(f"bold {col}", FRAMES[int(el * FRAME_FPS) % len(FRAMES)] + " "),
+        return [(f"bold {col}", self.glyph(el)),
                 (col, self.verbs[int(el / 2.5) % len(self.verbs)] + "…"),
                 (MUTED, tr_(" ({0} · ↓ {1} tokens", fmt_time(el), fmt_tokens(self.tokens))
                         + (tr_(" · {0} tok/s", f"{self.tokens / el:.0f}") if el >= 1.5 and self.tokens else "")
@@ -132,8 +162,9 @@ class StreamView:
             self.live.stop()
             self.live = None
         if self.buf.strip() and not self.swallow:
-            self.console.print(Markdown(voice.VOICE.handle(self.buf)))
+            self._emit(self.buf)
         self.buf = ""
+        voice.VOICE.flush()                 # the reply is complete: speak it as one clip
 
     def abort(self) -> None:
         self._stop_and_flush()
@@ -145,6 +176,5 @@ class StreamView:
             return
         n = tokens if tokens is not None else self.tokens
         mark = "" if tokens is not None else "~"
-        self.console.print(
-            tr_('[{MUTED}]✾ done in {0} · ↓ {mark}{1} tokens[/]', fmt_time(time.time() - self.t0), fmt_tokens(n), MUTED=MUTED, mark=mark),
-            highlight=False)
+        line = tr_('[{MUTED}]✾ done in {0} · ↓ {mark}{1} tokens[/]', fmt_time(time.time() - self.t0), fmt_tokens(n), MUTED=MUTED, mark=mark)
+        voice.VOICE.defer(lambda: self.console.print(line, highlight=False))   # after the spoken text, not before it

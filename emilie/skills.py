@@ -100,8 +100,10 @@ BUILTIN = Path(__file__).resolve().parent / "builtin"      # skills that ship wi
 def _roots(cwd: str) -> list[tuple[Path, str]]:
     """Earlier wins when names clash: a project's own skill beats yours, which beats the one that ships with Emilie."""
     home, here = Path.home(), Path(cwd)
-    return [(here / ".emilie", "project"), (here / ".claude", "project"),
-            (home / ".emilie", "user"), (home / ".claude", "user"), (BUILTIN, "builtin")]
+    from . import plugins
+    return ([(here / ".emilie", "project"), (here / ".claude", "project"),
+             (home / ".emilie", "user"), (home / ".claude", "user")]
+            + [(d, "plugin") for d in plugins.enabled_roots()] + [(BUILTIN, "builtin")])
 
 
 def _slug(s: str) -> str:
@@ -184,14 +186,29 @@ def load(cwd: str) -> None:
     _sync_tool()
 
 
+BRIEF_CHARS, BRIEF_TRIGGERS = 190, 5
+
+
+def _brief(s: "Skill") -> str:
+    """One compact line for the system prompt: what the skill is for (the first sentence, cut at a word) and its first
+    few trigger phrases. The whole description is long (up to ~700 chars) and the list is sent with every request; the
+    full text still loads with use_skill, and a trigger phrase in the user's message adds a <skill-hint> (with_hint)."""
+    d = s.description.strip()
+    head = re.split(r"\s(?:Includes|Not for|Triggers?)", d, maxsplit=1)[0].strip()
+    if len(head) > BRIEF_CHARS:
+        head = head[:BRIEF_CHARS].rsplit(" ", 1)[0].rstrip(" ,;:-") + "…"
+    trig = triggers(s)[:BRIEF_TRIGGERS]
+    return head + (f" Triggers: {', '.join(trig)}." if trig else "")
+
+
 def prompt_section() -> str:
     if not SKILLS:
         return ""
     lines = ["# Available skills",
-             "If the request matches a skill's description, even partly, your FIRST action must be to call use_skill for "
-             "it, before searching, reading files or answering. A skill holds the procedure, the quality bar and the "
-             "output format the user expects, so do not work from memory when one applies. A skill may tell you to load "
-             "another one: do so. If none matches, carry on normally."]
+             "When the request clearly matches a skill, call use_skill for it before you start: a skill holds the "
+             "procedure, the quality bar and the output format the user expects, so do not work from memory when one "
+             "applies. If the message carries a <skill-hint>, follow it. A quick question or a small edit needs no "
+             "skill. A skill may tell you to load another one: do so."]
     if any(s.phase for s in SKILLS.values()):
         lines.append("You work like a senior developer, in phases: " + " -> ".join(f"{lab} ({pid})" for pid, lab in PHASES) +
                      ". Understand before planning, plan before building, verify before releasing. For a task decide which "
@@ -207,7 +224,7 @@ def prompt_section() -> str:
         if any(s.phase for s in SKILLS.values()):
             lines.append(head)
         for s in items[:60]:
-            line = f"- {s.name}: {s.description[:DESC_LIMIT]}"
+            line = f"- {s.name}: {_brief(s)}"
             budget -= len(line)
             if budget < 0:
                 return "\n".join(lines)
@@ -228,9 +245,15 @@ def matching(text: str) -> list["Skill"]:
     low = (text or "").lower()
     out = []
     for s in SKILLS.values():
-        if any(re.search(r"(?<!\w)" + re.escape(p) + r"(?!\w)", low) for p in triggers(s)):
+        # a skill named after a file type ("pdf", "docx"...) also matches when the message just says that word,
+        # since such skills (Anthropic's) list no quoted trigger phrases and weaker models skip them otherwise
+        phrases = triggers(s) + ([s.name] if s.name in FILE_TYPE_SKILLS else [])
+        if any(re.search(r"(?<!\w)" + re.escape(p) + r"(?!\w)", low) for p in phrases):
             out.append(s)
     return out
+
+
+FILE_TYPE_SKILLS = {"pdf", "docx", "xlsx", "pptx"}
 
 
 def with_hint(text: str) -> str:

@@ -1,0 +1,511 @@
+@import "tailwindcss";
+@import "@fontsource-variable/source-sans-3";
+@import "@fontsource-variable/source-sans-3/wght-italic.css";
+@import "@fontsource-variable/newsreader";
+@import "@fontsource-variable/newsreader/wght-italic.css";
+@import "@fontsource/atkinson-hyperlegible/400.css";
+@import "@fontsource/atkinson-hyperlegible/700.css";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ------------------------------------------------------------------ design tokens (Claude's palette) */
+:root {
+  --bg-000: #ffffff;
+  --bg-100: #faf9f5;
+  --bg-200: #f5f4ee;
+  --bg-300: #f0eee6;
+  --bg-400: #e8e6dc;
+  --text-000: #141413;
+  --text-100: #141413;
+  --text-200: #3d3d3a;
+  --text-300: #3d3d3a;
+  --text-400: #73726c;
+  --text-500: #8f8d86;
+  --border-100: rgb(31 30 29 / 0.07);
+  --border-200: rgb(31 30 29 / 0.11);
+  --border-300: rgb(31 30 29 / 0.15);
+  --border-400: rgb(31 30 29 / 0.3);
+  --accent: #1d6bc4;                 /* Emilie blue accent */
+  --accent-100: #2b7dd8;
+  --accent-fg: #ffffff;
+  --accent-soft: rgb(29 107 196 / 0.13);
+  --link: #2c84db;
+  --danger: #c93a52;                 /* a rose red, not coral: nothing orange in Emilie */
+  --danger-soft: rgb(201 58 82 / 0.09);
+  --ok: #3f8f5c;
+  --warn: #a8860f;
+  --warn-soft: rgb(168 134 15 / 0.1);
+  --changes-bg: #ebe8df;               /* the Changes panel: a touch deeper than the other panels */
+  --diff-add-bg: rgb(63 143 92 / 0.12);
+  --diff-add: #2b6e43;
+  --diff-del-bg: rgb(201 58 82 / 0.1);
+  --diff-del: #a32a40;
+  --code-bg: #f5f4ee;
+  --hover: rgb(31 30 29 / 0.05);
+  --active: rgb(31 30 29 / 0.09);
+  --menu-bg: #ffffff;
+  --dropdown-bg: var(--menu-bg);      /* dropdown menus (measured from Claude Code dark: #303030 / #363636 / #454545) */
+  --dropdown-border: var(--border-300);
+  --dropdown-sep: var(--border-300);
+  --task-border: var(--border-300);    /* the task list box in the conversation (Claude Code dark: #202020) */
+  /* Projects / Artifacts pages and the Search palette (dark values measured from Claude Code) */
+  --tab-on: rgb(31 30 29 / 0.08);
+  --card-fill: rgb(31 30 29 / 0.035);
+  --card-line: rgb(31 30 29 / 0.12);
+  --card-foot: #ffffff;
+  --thumb-bg: #ecebe4;
+  --folder-tint: #2f7bd8;
+  --folder-tile: rgb(47 123 216 / 0.1);
+  --btn-solid: #141413;
+  --btn-solid-fg: #ffffff;
+  --pal-bg: #ffffff;
+  --pal-border: rgb(31 30 29 / 0.18);
+  --pal-sep: rgb(31 30 29 / 0.1);
+  --pal-hi: rgb(31 30 29 / 0.07);
+  --pal-dim: rgb(0 0 0 / 0.22);
+  --pal-row: #3d3d3a;
+  --pal-kbd: rgb(31 30 29 / 0.25);
+  /* charts (Settings -> Usage): one series hue per accent, checked with the dataviz palette validator */
+  --chart-1: #1d6bc4;
+  --chart-grid: #e4e2da;
+  --chart-axis: #c9c7bd;
+  --user-bubble: #f0eee6;
+  --seg-bg: #ebe9e0;
+  --card-border: rgb(31 30 29 / 0.12);
+  --composer-bg: #ffffff;
+  --composer-border: rgb(31 30 29 / 0.16);
+  --ring: var(--accent-100);         /* the context ring follows the accent */
+  --divider: rgb(31 30 29 / 0.1);
+  --shadow-lg: 0 10px 38px -10px rgb(22 23 24 / 0.25), 0 10px 20px -15px rgb(22 23 24 / 0.2);
+  --scroll: rgb(31 30 29 / 0.18);
+  --font-chat: var(--font-serif);
+  --chat-size: 12.6px;               /* Newsreader at 12.6px sets lines exactly as wide as Claude's Anthropic Serif */
+  --col-w: 585px;                /* the message box and the conversation column (Claude Code's width) */
+  color-scheme: light;
+}
+/* dark = the Claude Code desktop palette, measured from the real app: neutral greys, not warm */
+.dark {
+  --bg-000: #303030;
+  --bg-100: #191919;
+  --bg-200: #1f1f1f;
+  --bg-300: #262626;
+  --bg-400: #2a2a2a;
+  --text-000: #ffffff;
+  --text-100: #f2f2f2;
+  --text-200: #d6d6d6;
+  --text-300: #c2c2c2;
+  --text-400: #9c9c9c;
+  --text-500: #838383;
+  --border-100: #222222;
+  --border-200: #2a2a2a;
+  --border-300: #303030;
+  --border-400: #3c3c3c;
+  --accent: #257de0;
+  --accent-100: #4a93e8;
+  --accent-fg: #ffffff;
+  --accent-soft: rgb(37 125 224 / 0.18);
+  --link: #6aabf1;
+  --menu-bg: #262626;
+  --dropdown-bg: #303030;
+  --dropdown-border: #363636;
+  --dropdown-sep: #454545;
+  --task-border: #202020;
+  --tab-on: #3b3b3b;
+  --card-fill: #212121;
+  --card-line: #434343;
+  --card-foot: #1f1f1f;
+  --thumb-bg: #2f2f2f;
+  --folder-tint: #5099e7;
+  --folder-tile: #252d36;
+  --btn-solid: #f3f3f3;
+  --btn-solid-fg: #191919;
+  --pal-bg: #303030;
+  --pal-border: #525252;
+  --pal-sep: #454545;
+  --pal-hi: #4f4f4f;
+  --pal-dim: rgb(0 0 0 / 0.5);
+  --pal-row: #bdbdbd;
+  --pal-kbd: #5a5a5a;
+  --chart-1: #257de0;
+  --chart-grid: #2c2c2c;
+  --chart-axis: #3d3d3d;
+  --user-bubble: #252525;
+  --seg-bg: #2a2a2a;
+  --card-border: #232323;
+  --composer-bg: #303030;
+  --composer-border: #3c3c3c;
+  --ring: var(--accent-100);
+  --divider: #252525;
+  --danger: #fa8080;
+  --danger-soft: rgb(250 128 128 / 0.12);
+  --ok: #6bbf87;
+  --warn: #e8c55a;
+  --warn-soft: rgb(232 197 90 / 0.12);
+  --changes-bg: #252525;
+  --diff-add-bg: rgb(107 191 135 / 0.12);
+  --diff-add: #93d6a8;
+  --diff-del-bg: rgb(250 128 128 / 0.10);
+  --diff-del: #fa8080;
+  --code-bg: #1f1f1f;
+  --hover: rgb(255 255 255 / 0.045);
+  --active: #404040;
+  --shadow-lg: 0 10px 38px -10px rgb(0 0 0 / 0.6), 0 10px 20px -15px rgb(0 0 0 / 0.5);
+  --scroll: rgb(255 255 255 / 0.14);
+  color-scheme: dark;
+}
+/* eveny: a deep navy, almost black. It is the dark theme (class "dark" is on too) with every grey swapped for a navy. */
+.eveny {
+  --changes-bg: #0c1322;
+  --bg-000: #16203a;
+  --bg-100: #0a0f1c;
+  --bg-200: #0d1424;
+  --bg-300: #111a2e;
+  --bg-400: #16213a;
+  --text-000: #ffffff;
+  --text-100: #e9eefa;
+  --text-200: #cdd6ea;
+  --text-300: #b4bfd8;
+  --text-400: #8e9bb8;
+  --text-500: #77839f;
+  --border-100: #111a2c;
+  --border-200: #16213a;
+  --border-300: #1c2946;
+  --border-400: #27385c;
+  --accent: #3b82f0;
+  --accent-100: #6aa2f5;
+  --accent-soft: rgb(59 130 240 / 0.2);
+  --link: #7fb0f7;
+  --menu-bg: #111a2e;
+  --dropdown-bg: #16213a;
+  --dropdown-border: #1f2e4f;
+  --dropdown-sep: #26395f;
+  --task-border: #0f1729;
+  --tab-on: #1d2b4a;
+  --card-fill: #0f1829;
+  --card-line: #22335a;
+  --card-foot: #0d1424;
+  --thumb-bg: #16213a;
+  --folder-tint: #6aa2f5;
+  --folder-tile: #14213d;
+  --btn-solid: #e9eefa;
+  --btn-solid-fg: #0a0f1c;
+  --pal-bg: #16213a;
+  --pal-border: #2c4068;
+  --pal-sep: #26395f;
+  --pal-hi: #22335a;
+  --pal-dim: rgb(2 5 14 / 0.6);
+  --pal-row: #b4bfd8;
+  --pal-kbd: #3a4d78;
+  --chart-1: #3b82f0;
+  --chart-grid: #16213a;
+  --chart-axis: #26385c;
+  --user-bubble: #121c32;
+  --seg-bg: #131d33;
+  --card-border: #16213a;
+  --composer-bg: #111a2e;
+  --composer-border: #22335a;
+  --divider: #131d33;
+  --code-bg: #0d1424;
+  --hover: rgb(160 190 255 / 0.06);
+  --active: #1f2e4f;
+  --shadow-lg: 0 10px 38px -10px rgb(0 4 14 / 0.7), 0 10px 20px -15px rgb(0 4 14 / 0.6);
+  --scroll: rgb(160 190 255 / 0.16);
+}
+.accent-lavender { --accent: #8a63c9; --accent-100: #9d7ad6; --accent-soft: rgb(157 122 214 / 0.13); --chart-1: #8a63c9; }
+.dark.accent-lavender { --accent: #b49bea; --accent-100: #c6b2f0; --accent-soft: rgb(180 155 234 / 0.18); --chart-1: #9d7ad6; }
+.eveny.accent-lavender { --accent: #b49bea; --accent-100: #c6b2f0; --accent-soft: rgb(180 155 234 / 0.2); --chart-1: #9d7ad6; }
+/* the few greys written straight into components (dark:border-[#353535] and friends) follow the navy too */
+.eveny .dark\:border-\[\#353535\], .eveny .dark\:border-\[\#222\] { border-color: var(--border-300); }
+.eveny .dark\:bg-\[\#4a4a4a\] { background-color: var(--active); }
+.eveny .dark\:bg-\[\#3b3b3b\], .eveny .dark\:bg-\[\#353535\] { background-color: var(--tab-on); }
+.eveny .dark\:bg-\[\#303030\] { background-color: var(--bg-000); }
+
+.chat-sans { --font-chat: var(--font-sans); --chat-size: 13px; }
+.chat-system { --font-chat: system-ui, -apple-system, "Segoe UI", sans-serif; --chat-size: 13px; }
+.chat-dyslexic { --font-chat: "Atkinson Hyperlegible", "OpenDyslexic", Verdana, sans-serif; --chat-size: 12.5px; }
+.chat-sans .md, .chat-system .md { line-height: 1.42; }
+
+@theme inline {
+  --color-bg-000: var(--bg-000);
+  --color-bg-100: var(--bg-100);
+  --color-bg-200: var(--bg-200);
+  --color-bg-300: var(--bg-300);
+  --color-bg-400: var(--bg-400);
+  --color-text-000: var(--text-000);
+  --color-text-100: var(--text-100);
+  --color-text-200: var(--text-200);
+  --color-text-300: var(--text-300);
+  --color-text-400: var(--text-400);
+  --color-text-500: var(--text-500);
+  --color-border-100: var(--border-100);
+  --color-border-200: var(--border-200);
+  --color-border-300: var(--border-300);
+  --color-border-400: var(--border-400);
+  --color-accent: var(--accent);
+  --color-accent-100: var(--accent-100);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-link: var(--link);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-hover: var(--hover);
+  --color-active: var(--active);
+  --color-menu: var(--menu-bg);
+  --color-user-bubble: var(--user-bubble);
+  --color-seg: var(--seg-bg);
+  --color-card-border: var(--card-border);
+  --color-composer: var(--composer-bg);
+  --color-composer-border: var(--composer-border);
+  --color-ring: var(--ring);
+  --font-sans: "Source Sans 3 Variable", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-serif: "Newsreader Variable", "Tiempos Text", Georgia, Cambria, "Times New Roman", serif;
+  --font-mono: "Cascadia Code", "Cascadia Mono", "JetBrains Mono", Consolas, "SF Mono", Menlo, monospace;
+  --font-chat: var(--font-chat);
+  --shadow-menu: var(--shadow-lg);
+  --animate-fade-in: fade-in 160ms ease-out;
+  --animate-pop: pop 140ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-spin-slow: spin 1.4s linear infinite;
+}
+
+@keyframes fade-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+@keyframes pop { from { opacity: 0; transform: scale(0.97); } to { opacity: 1; transform: none; } }
+@keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@keyframes bloom-turn { to { transform: rotate(360deg); } }
+@keyframes bloom-breathe { 0%,100% { transform: scale(0.8); } 20% { transform: scale(1.08); } 32% { transform: scale(0.95); } 44% { transform: scale(1.02); } 56% { transform: scale(1); } 80% { transform: scale(0.9); } }
+@keyframes bloom-glow { 0%, 100% { opacity: 0.3; transform: scale(1); animation-timing-function: cubic-bezier(.2, .8, .3, 1); } 35% { opacity: 1; transform: scale(1.2); animation-timing-function: cubic-bezier(.5, 0, .75, .4); } 70% { opacity: 0.5; transform: scale(1.04); animation-timing-function: ease-out; } }
+@keyframes word-in { from { opacity: 0; transform: translateY(4px); filter: blur(2px); } to { opacity: 1; transform: none; filter: none; } }
+
+@layer base {
+/* ------------------------------------------------------------------ base */
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg-100);
+  color: var(--text-100);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+  user-select: none;
+}
+::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+button { cursor: default; }
+.selectable, .selectable * { user-select: text; }
+
+/* window dragging (frameless title bar) */
+.drag { -webkit-app-region: drag; }
+.no-drag, .drag button, .drag input, .drag a, .drag [role="button"] { -webkit-app-region: no-drag; }
+
+/* thin scrollbars like the Claude app */
+* { scrollbar-width: thin; scrollbar-color: var(--scroll) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--scroll); border-radius: 8px; border: 3px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-track { background: transparent; }
+}
+
+@layer components {
+.shimmer-text {
+  background: linear-gradient(90deg, var(--text-400) 0%, var(--text-400) 40%, var(--text-100) 50%, var(--text-400) 60%, var(--text-400) 100%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 2.4s linear infinite;
+}
+.item-in { animation: var(--animate-fade-in); }
+.cv-auto { content-visibility: auto; contain-intrinsic-size: auto 120px; }
+/* Emilie's working flower: turns slowly, breathes, and its five petals glow one after another */
+.bloom, .work-icon { color: #86a595; }
+.bloom { animation: bloom-turn 8s linear infinite; }
+.accent-lavender .bloom, .accent-lavender .work-icon { color: color-mix(in srgb, var(--accent) 78%, white); }
+.bloom-inner { transform-box: view-box; transform-origin: 8px 8px; }   /* no more breathing of the whole flower: only the lit petal grows */
+.bloom-petal { transform-box: view-box; transform-origin: 8px 8px; animation: bloom-glow 1.4s ease-in-out infinite; }
+/* each new working word slides in softly */
+.word-in { display: inline-block; animation: word-in 0.38s ease-out; }
+/* /todos: the task list it scrolls to lights up for a moment */
+@keyframes flash-ring { 0% { box-shadow: 0 0 0 0 transparent; } 25% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 45%, transparent); } 100% { box-shadow: 0 0 0 0 transparent; } }
+.flash { animation: flash-ring 1.4s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .bloom, .bloom-inner, .bloom-petal, .word-in, .flash, .work-icon * { animation: none !important; }
+}
+/* long titles fade out at the right edge (the Claude sidebar does not use '…') */
+.fade-r { overflow: hidden; white-space: nowrap; -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent); }
+
+/* ------------------------------------------------------------------ markdown (assistant prose) */
+.md { font-family: var(--font-chat); font-size: var(--chat-size); line-height: 1.27; color: var(--text-100); overflow-wrap: anywhere; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p { margin: 0 0 0.7em; }
+.md h1, .md h2, .md h3, .md h4 { font-family: var(--font-chat); font-weight: 600; line-height: 1.3; margin: 1.1em 0 0.45em; }
+.md h1 { font-size: 1.45em; }
+.md h2 { font-size: 1.25em; }
+.md h3 { font-size: 1.1em; }
+.md h4 { font-size: 1em; }
+.md ul, .md ol { margin: 0 0 0.7em; padding-left: 1.45em; }
+.md ul { list-style: disc; }
+.md ol { list-style: decimal; }
+.md li { margin: 0.15em 0; }
+.md li > p { margin: 0.2em 0; }
+.md li::marker { color: var(--text-400); }
+.md a { color: var(--link); text-decoration: underline; text-underline-offset: 2px; text-decoration-color: color-mix(in srgb, var(--link) 45%, transparent); cursor: pointer; }
+.md strong { font-weight: 600; }
+.md blockquote { margin: 0 0 0.9em; padding: 0.1em 0 0.1em 1em; border-left: 3px solid var(--border-400); color: var(--text-300); }
+.md hr { border: 0; border-top: 1px solid var(--border-300); margin: 1.4em 0; }
+.md table { border-collapse: collapse; margin: 0 0 0.8em; font-family: var(--font-sans); font-size: 0.9em; display: block; overflow-x: auto; max-width: 100%; }
+.md th, .md td { border: 1px solid var(--border-300); padding: 4px 9px; text-align: left; vertical-align: top; }
+.md th { background: var(--bg-200); font-weight: 600; }
+.md img { max-width: 100%; border-radius: 8px; }
+.md code { font-family: var(--font-mono); font-size: 0.82em; }
+.md :not(pre) > code { background: var(--bg-400); padding: 0.08em 0.32em; border-radius: 4px; color: var(--text-100); }
+.dark .md :not(pre) > code { background: #2a2a2a; }
+.md .say { font-style: italic; color: var(--text-300); }
+
+/* code blocks */
+.codeblock { margin: 0 0 1em; border: 1px solid var(--border-300); border-radius: 8px; overflow: hidden; background: var(--code-bg); font-family: var(--font-sans); }
+.codeblock-head { display: flex; align-items: center; justify-content: space-between; height: 28px; padding: 0 6px 0 10px; font-size: 11px; color: var(--text-400); border-bottom: 0.5px solid var(--border-200); }
+.codeblock-head button { display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px; border-radius: 5px; font-size: 11px; color: var(--text-400); }
+.codeblock-head button:hover { background: var(--hover); color: var(--text-100); }
+.codeblock pre { margin: 0; padding: 9px 12px; overflow-x: auto; font-size: var(--code-size, 11px); line-height: calc(var(--code-size, 11px) * 1.38); font-family: var(--font-mono); }
+.codeblock pre code { font-size: inherit; background: none; border: 0; padding: 0; }
+
+/* highlight.js colours (light / dark). The --hl-* variables come from the chosen code theme (Settings > Appearance > Code);
+   without one the Claude colours below apply. */
+.hljs-comment, .hljs-quote { color: var(--hl-comment, #8b8a83); font-style: italic; }
+.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-built_in { color: var(--hl-keyword, #a8467f); }
+.hljs-string, .hljs-attr-value, .hljs-template-string, .hljs-regexp, .hljs-addition { color: var(--hl-string, #3f7d4e); }
+.hljs-number, .hljs-symbol, .hljs-bullet { color: var(--hl-number, #8a4fc0); }
+.hljs-title, .hljs-title.function_, .hljs-section { color: var(--hl-title, #2f6db0); }
+.hljs-attr, .hljs-attribute, .hljs-variable, .hljs-template-variable, .hljs-property { color: var(--hl-attr, #2a7c8a); }
+.hljs-type, .hljs-class .hljs-title, .hljs-title.class_ { color: var(--hl-type, #7a4fb5); }
+.hljs-meta, .hljs-tag, .hljs-name { color: var(--hl-meta, #5b6a7a); }
+.hljs-deletion { color: var(--diff-del); }
+.dark .hljs-keyword, .dark .hljs-selector-tag, .dark .hljs-literal, .dark .hljs-built_in { color: var(--hl-keyword, #e889b8); }
+.dark .hljs-string, .dark .hljs-attr-value, .dark .hljs-template-string, .dark .hljs-regexp, .dark .hljs-addition { color: var(--hl-string, #a6d68a); }
+.dark .hljs-number, .dark .hljs-symbol, .dark .hljs-bullet { color: var(--hl-number, #c9a8f4); }
+.dark .hljs-title, .dark .hljs-title.function_, .dark .hljs-section { color: var(--hl-title, #7cb7f2); }
+.dark .hljs-attr, .dark .hljs-attribute, .dark .hljs-variable, .dark .hljs-template-variable, .dark .hljs-property { color: var(--hl-attr, #e8c37a); }
+.dark .hljs-type, .dark .hljs-class .hljs-title, .dark .hljs-title.class_ { color: var(--hl-type, #c4a3f2); }
+.dark .hljs-meta, .dark .hljs-tag, .dark .hljs-name { color: var(--hl-meta, #9fb0c0); }
+.dark .hljs-comment, .dark .hljs-quote { color: var(--hl-comment, #7d7c76); }
+
+/* code size and colours chosen in Settings > Appearance > Code (unset = the defaults above) */
+.codeblock pre, .code-view, .diff { color: var(--code-fg, inherit); }
+.code-view { background: var(--code-bg-custom, transparent); min-height: 100%; }
+.code-view .gutter { background: var(--code-bg-custom, var(--bg-100)); }
+
+/* notices printed by commands (HTML from blocks.py keeps the CLI's colours) */
+.blocks table { border-collapse: collapse; width: 100%; font-size: 11.5px; }
+.blocks td, .blocks th { padding: 5px 14px 5px 0; text-align: left; vertical-align: top; white-space: pre-wrap; }
+.blocks td:last-child, .blocks th:last-child { padding-right: 0; }
+.blocks th { font-weight: 500; font-size: 11px; color: var(--text-400); border-bottom: 0.5px solid var(--border-300); }
+.blocks tbody tr + tr td { border-top: 0.5px solid var(--border-200); }
+.blocks pre { margin: 0; white-space: pre-wrap; font-family: var(--font-mono); font-size: var(--code-size, 11px); line-height: 1.5; }
+/* in the app's cards the terminal's grey (MUTED) reads as the secondary text colour, and titles are neutral
+   (the terminal colours them pink); accents such as the selected item keep their colour */
+.notice-lines [style*="#8a8a8a"], .np-card [style*="#8a8a8a"] { color: var(--text-400) !important; }
+.np-title [style*="color"] { color: var(--text-100) !important; }
+
+/* diffs */
+.diff { font-family: var(--font-mono); font-size: var(--code-size, 11px); line-height: 1.55; }
+.diff .ln { display: flex; white-space: pre; }
+/* Changes pane: cards scrolled out of view are skipped by layout/paint, so resizing stays smooth with many files. */
+.bg-changes { background-color: var(--changes-bg); }
+.diff-card { content-visibility: auto; contain-intrinsic-size: auto 240px; }
+.diff .ln > .mk { width: 22px; flex: none; text-align: center; color: var(--text-500); user-select: none; }
+.diff .ln > .no { width: 3.4ch; box-sizing: content-box; padding: 0 6px 0 10px; flex: none; text-align: right; color: var(--text-500); opacity: .7; user-select: none; }
+.diff .ln.add { background: var(--diff-add-bg); }
+.diff .ln.del { background: var(--diff-del-bg); }
+.diff .ln.add > .mk { color: var(--diff-add); }
+.diff .ln.del > .mk { color: var(--diff-del); }
+/* one column, no sideways scrolling: long lines wrap and the green/red band follows the whole wrapped line */
+.diff.wrap .ln { white-space: pre-wrap; overflow-wrap: anywhere; }
+.diff.wrap .ln > .tx { min-width: 0; flex: 1 1 auto; }
+.diff .ln.empty { background: rgba(128, 128, 128, .07); }
+/* side by side: old on the left, new on the right */
+.diff.split .sp { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.diff.split .sp > .ln + .ln { border-left: 1px solid var(--border-300); }
+.diff.split .sp > .ln { min-width: 0; }
+.diff .ln.hunk { color: var(--text-500); background: var(--bg-200); }
+
+/* the file viewer in the side pane: line numbers + code, like the Claude Code viewer */
+.code-view { font-family: var(--font-mono); font-size: var(--code-size, 11px); line-height: calc(var(--code-size, 11px) * 1.38); }
+.code-view .gutter { color: var(--text-400); text-align: right; user-select: none; padding: 0 14px 0 8px; }
+.code-view .gutter .cur { color: var(--text-000); }
+}
+
+/* the little level meter beside "Speaking" */
+.eq { display: inline-flex; height: 12px; align-items: flex-end; gap: 2px; }
+.eq i { display: block; width: 2px; height: 100%; border-radius: 1px; background: currentColor; transform-origin: bottom; animation: eq-bar .9s ease-in-out infinite; }
+.eq i:nth-child(2) { animation-delay: -.3s; animation-duration: .7s; }
+.eq i:nth-child(3) { animation-delay: -.6s; animation-duration: 1.1s; }
+.eq i:nth-child(4) { animation-delay: -.15s; animation-duration: .8s; }
+@keyframes eq-bar { 0%, 100% { transform: scaleY(.25); } 50% { transform: scaleY(1); } }
+@media (prefers-reduced-motion: reduce) { .eq i { animation: none; transform: scaleY(.6); } }
+
+/* while a splitter / panel is dragged, a page inside a panel must not take the mouse (it would swallow the release) */
+body.dragging webview, body.dragging iframe { pointer-events: none !important; }
+
+/* ---- animated tool marks that replace the flower while a tool call is being drafted (same colour as the flower) ---- */
+/* The flower says what the model is doing. The slow turn is the SAME in every state (changing it when the state
+   changes restarts the animation and the flower jumps back); only the petals and the breathing differ:
+   waiting = one petal lit at a time, sweeping round slowly, like a clock hand; thinking = the default;
+   replying = brisk and bright. Petal delays are negative, so the motion is already running the moment it appears. */
+.bloom-wait .bloom-petal { animation-name: bloom-sweep; animation-duration: 2.6s; --ds: 1.9; }
+.bloom-reply .bloom-petal { animation-duration: 0.7s; --ds: 0.5; }
+@keyframes bloom-sweep { 0%, 100% { opacity: 0.22; transform: scale(1); } 12% { opacity: 1; transform: scale(1.2); } 40% { opacity: 0.22; transform: scale(1); } }
+
+/* ---- tool marks (replace the flower while a tool works). Every loop ends where it starts, so it never hitches. ---- */
+.work-icon * { transform-box: view-box; }
+/* command: the chevron breathes, a command is typed key by key, the caret follows, then the line fades for the next one */
+@keyframes wi-prompt { 0%, 100% { opacity: 0.5; animation-timing-function: cubic-bezier(.2, .8, .3, 1); } 50% { opacity: 1; animation-timing-function: cubic-bezier(.6, 0, .8, .4); } }
+@keyframes wi-type { 0% { transform: scaleX(0); opacity: 1; animation-timing-function: steps(7, end); } 62% { transform: scaleX(1); opacity: 1; } 86% { transform: scaleX(1); opacity: 1; } 100% { transform: scaleX(1); opacity: 0; } }
+@keyframes wi-caret { 0% { transform: translateX(0); opacity: 0; animation-timing-function: steps(7, end); } 4% { opacity: 1; } 62% { transform: translateX(4.4px); opacity: 1; } 70% { opacity: 0.2; } 78% { opacity: 1; } 86% { transform: translateX(4.4px); opacity: 1; } 100% { transform: translateX(4.4px); opacity: 0; } }
+.wi-prompt { animation: wi-prompt 1.4s ease-in-out infinite; }
+.wi-type { transform-origin: 8px 10px; animation: wi-type 2.6s linear infinite; }
+.wi-caret { animation: wi-caret 2.6s linear infinite; }
+/* plan: each tick draws itself, holds, fades; the rows are staggered so the list ripples */
+@keyframes wi-check { 0% { stroke-dashoffset: 1; opacity: 0; } 8% { stroke-dashoffset: 1; opacity: 1; animation-timing-function: cubic-bezier(.16, 1, .3, 1); } 34% { stroke-dashoffset: 0; } 78% { stroke-dashoffset: 0; opacity: 1; animation-timing-function: ease-in; } 100% { stroke-dashoffset: 0; opacity: 0; } }
+.wi-check { stroke-dasharray: 1; animation: wi-check 2.4s linear infinite; }
+/* helper: bobs, tilts (two different beats, so it never looks mechanical), blinks, its light pulses */
+@keyframes wi-bob { 0%,100% { transform: translateY(0.7px) scale(1.12,0.84); } 14% { transform: translateY(-1.6px) scale(0.9,1.14); } 26% { transform: translateY(-0.2px) scale(1.05,0.96); } 38% { transform: translateY(-1.1px) scale(0.98,1.03); } 50% { transform: translateY(-0.9px) scale(1); } 80% { transform: translateY(-0.4px) scale(1); } }
+@keyframes wi-tilt { 0% { transform: rotate(-6deg); } 18% { transform: rotate(9deg); } 30% { transform: rotate(3deg); } 40% { transform: rotate(7deg); } 50% { transform: rotate(6deg); } 68% { transform: rotate(-9deg); } 80% { transform: rotate(-3deg); } 90% { transform: rotate(-7deg); } 100% { transform: rotate(-6deg); } }
+@keyframes wi-blink { 0%, 90%, 100% { transform: scaleY(1); } 94% { transform: scaleY(0.1); } }
+@keyframes wi-led { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+.wi-bob { transform-box: fill-box; transform-origin: 50% 100%; animation: wi-bob 1.6s ease-out infinite; }
+.wi-tilt { transform-origin: 8px 13px; animation: wi-tilt 2.4s ease-in-out infinite; }
+.wi-eye { transform-box: fill-box; transform-origin: center; animation: wi-blink 3.2s ease-in-out infinite; }
+.wi-led { animation: wi-led 0.9s ease-in-out infinite; }
+/* wrench: swings to and fro at the bolt, the same speed both ways */
+@keyframes wi-swing { 0% { transform: rotate(-22deg); } 14% { transform: rotate(11deg); } 24% { transform: rotate(0deg); } 33% { transform: rotate(7deg); } 42% { transform: rotate(3deg); } 50% { transform: rotate(5deg); } 64% { transform: rotate(-27deg); } 74% { transform: rotate(-17deg); } 84% { transform: rotate(-24deg); } 100% { transform: rotate(-22deg); } }
+.wi-swing { transform-origin: 3.6px 12.4px; animation: wi-swing 1.3s ease-out infinite; }
+/* read: a scan line goes down the page and back up; the text lines glow as it passes */
+@keyframes wi-scan { 0% { transform: translateY(0); } 40% { transform: translateY(8px); } 50% { transform: translateY(6.4px); } 58% { transform: translateY(7.2px); } 66% { transform: translateY(7px); } 100% { transform: translateY(0); } }
+@keyframes wi-line { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+.wi-scan { animation: wi-scan 1.9s ease-out infinite; }
+.wi-line { animation: wi-line 1.9s ease-in-out infinite; }
+/* search: the lens circles a point and stays upright */
+@keyframes wi-orbit { to { transform: rotate(360deg); } }
+@keyframes wi-lens { to { transform: rotate(-360deg); } }
+/* the same curve on both, so the lens stays upright while the orbit speeds up and slows down */
+.wi-orbit { transform-origin: 8px 8px; animation: wi-orbit 2.6s cubic-bezier(.5, .1, .5, .9) infinite; }
+.wi-lens { transform-origin: 8px 4px; animation: wi-lens 2.6s cubic-bezier(.5, .1, .5, .9) infinite; }
+/* web: two meridians turn half a beat apart, so the globe seems to spin one way without end */
+@keyframes wi-spin { 0%, 100% { transform: scaleX(1); animation-timing-function: cubic-bezier(.37, 0, .63, 1); } 50% { transform: scaleX(0.08); animation-timing-function: cubic-bezier(.37, 0, .63, 1); } }
+.wi-spin { transform-origin: 8px 8px; animation: wi-spin 2.2s ease-in-out infinite; }
+.wi-spin.b { animation-delay: -1.1s; opacity: 0.55; }
+/* connect: the plug slides home (a spark), then eases back */
+@keyframes wi-plug { 0% { transform: translateX(-3.4px) scale(1,1); } 22% { transform: translateX(2.2px) scale(0.9,1.08); } 32% { transform: translateX(0.2px) scale(1.06,0.95); } 42% { transform: translateX(1.1px) scale(1); } 62% { transform: translateX(1.1px); animation-timing-function: cubic-bezier(.6,0,.8,.4); } 100% { transform: translateX(-3.4px); } }
+@keyframes wi-spark { 0%, 40%, 100% { opacity: 0; } 50%, 58% { opacity: 1; } }
+.wi-plug { transform-box: fill-box; transform-origin: 50% 50%; animation: wi-plug 2s linear infinite; }
+.wi-spark { animation: wi-spark 2s ease-in-out infinite; }
+
+/* a mark is never clipped by its own box or by a neighbour: it may draw past the edge, and sits above what is beside it */
+.work-icon, .bloom { overflow: visible; position: relative; z-index: 1; }
+
+/* the marks get their own layer, so the page repainting around them does not repaint them */
+.work-icon, .bloom { will-change: transform; }

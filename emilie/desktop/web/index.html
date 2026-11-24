@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Emilie</title>
+    <link rel="icon" href="/emilie-icon.png" />
+    <style>html,body{background:#191919;height:100%;margin:0}html.light,html.light body{background:#faf9f5}html.eveny,html.eveny body{background:#0a0f1c}</style>
+    <script>
+      // apply the saved color mode before React starts, so the window never flashes the wrong theme
+      try {
+        var t = localStorage.getItem("emilie-theme") || "dark";
+        var dark = t === "dark" || (t === "auto" && matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.className = t === "eveny" ? "dark eveny" : dark ? "dark" : "light";
+        if (t === "eveny") dark = true;
+      } catch (e) {}
+    </script>
+    <script type="module" crossorigin src="/assets/index-DvjU5ZzX.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DQmWf24b.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

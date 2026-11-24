@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline'; img-src 'self' file: data:" />
+  <title>Emilie</title>
+  <style>
+    :root { --bg: #191919; --fg: #9c9c9c; --ring: #303030; --accent: #d9689a; }
+    html.light { --bg: #faf9f5; --fg: #73726c; --ring: rgba(31, 30, 29, .15); --accent: #c4568a; }
+    html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg);
+      font: 12px "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; -webkit-app-region: drag; user-select: none; }
+    body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; }
+    img { width: 64px; height: 64px; border-radius: 50%; box-shadow: 0 0 0 1px var(--ring); animation: breathe 2.4s ease-in-out infinite; }
+    .flower { font-size: 18px; color: var(--accent); height: 22px; }
+    @keyframes breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.04); } }
+  </style>
+</head>
+<body>
+  <img src="../build/icon.png" alt="" />
+  <div class="flower" id="f">✿</div>
+  <div>Starting Emilie…</div>
+  <script>
+    if (new URLSearchParams(location.search).get("dark") === "0") document.documentElement.className = "light";
+    const F = ["∘", "✢", "✥", "✤", "❀", "✿", "✾", "❁", "❋", "❁", "✾", "✿", "❀", "✤", "✥", "✢"];
+    let i = 0;
+    setInterval(() => (document.getElementById("f").textContent = F[i++ % F.length]), 125);
+  </script>
+</body>
+</html>

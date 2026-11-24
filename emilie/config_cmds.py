@@ -24,13 +24,23 @@ KEYS: dict[str, Key] = {k.name: k for k in [
     Key("effort", "choice", "medium", True, "token-saving level", choices=("low", "medium", "high", "max")),
     Key("model", "str", None, False, "model name (use /model to pick from a list)"),
     Key("fallback_model", "str", None, True, "backup model when the main one keeps failing", nullable=True),
-    Key("thinking", "int", 0, True, "Claude extended-thinking tokens (0 = off, min 1024)", lo=0, hi=64000),
+    Key("thinking", "int", 0, True, "thinking budget for OLDER Claude models (0 = off, min 1024); current models "
+        "think by /effort", lo=0, hi=64000),
     Key("timeout", "int", 180, False, "seconds the provider may stay silent before giving up", lo=20, hi=1800),
-    Key("retries", "int", 2, True, "automatic retries on busy server / rate limit (0-5)", lo=0, hi=5),
+    Key("retries", "int", 6, True, "how often a rate-limited (429) or busy request is tried again; the waits grow "
+        "from 5 s to a minute (0-10)", lo=0, hi=10),
+    Key("syntax_check", "bool", True, True, "check a file's syntax right after Emilie changes it; she is told about "
+        "an error at once"),
+    Key("overwrite_guard", "bool", True, True, "write_file may not replace a file Emilie has not read, or one that "
+        "changed on disk since she read it"),
+    Key("trim_tool_results", "bool", True, True, "send old tool results (file reads, searches, command output) as a short "
+        "stub instead of in full; the newest 6 stay whole and nothing is lost on screen or in the saved session"),
     Key("scroll_lines", "int", 2, True, "lines per mouse-wheel notch", lo=1, hi=10),
     Key("scroll_smooth", "int", 75, True, "scroll easing in milliseconds (0 = instant)", lo=0, hi=300),
     Key("context_limit", "int", None, True, "this model's context window in tokens (auto-compact stays under 70% of it)",
         lo=2048, hi=2_000_000),
+    Key("compact_at", "int", None, True, "summarise the history once the context passes this many tokens "
+        "(default: the effort level's)", lo=4000, hi=2_000_000),
     Key("price_in", "float", None, True, "USD per million INPUT tokens, for the cost estimate in /cost", lo=0, hi=1000),
     Key("price_out", "float", None, True, "USD per million OUTPUT tokens, for the cost estimate in /cost", lo=0, hi=1000),
     Key("mouse", "bool", True, False, "mouse support: wheel scroll + select inside Emilie"),
