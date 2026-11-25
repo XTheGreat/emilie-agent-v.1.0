@@ -964,6 +964,12 @@ class Desk:
             if len(a.messages) < n0:               # /rewind or /compact moved the history: drop notes past its end
                 with self.lock:
                     self.extras = [e for e in self.extras if e[0] <= len(a.messages)]
+                if raw.startswith("/rewind"):
+                    # the chat was cut: the window must be redrawn from the shorter history (it only learns of changes
+                    # item by item otherwise), and what was typed at the removed positions must not stick to new messages
+                    for k in [k for k in self.aliases if str(k).isdigit() and int(k) >= len(a.messages)]:
+                        del self.aliases[k]
+                    self.snap_in_turn = True
             else:
                 # a turn that was removed from history (stopped before anything was done) leaves notes that point past
                 # the end; pinned to the end they keep their place, instead of sorting after later notes on reopening
@@ -1014,11 +1020,7 @@ class Desk:
             if err:
                 self.note(f"camera: {err}", "error")
                 return
-            try:
-                cam.open_viewer()
-            except Exception as e:
-                log(f"viewer: {e}")
-            self.cam = cam
+            self.cam = cam                      # the window is drawn by the app (CallWindow), from frame() below
             self._last_chat = time.monotonic()
             self.agent.call_begin()
             threading.Thread(target=self._companion_loop, args=(cam,), daemon=True).start()
@@ -1178,6 +1180,21 @@ class Desk:
             return reply(self.commands())
         elif c == "call":
             self.call(bool(cmd.get("on")))
+        elif c == "frame":                  # the newest camera frame, small, for the in-app call window
+            cam = self.cam
+            if cam is None:
+                return reply({"on": False})
+            if cam.error:
+                return reply({"error": str(cam.error)})
+            fr, _ = cam.frame()
+            if fr is None:
+                return reply({})
+            from PIL import Image
+            im = Image.fromarray(fr)
+            im.thumbnail((320, 320))
+            buf = io.BytesIO()
+            im.save(buf, "JPEG", quality=72)
+            return reply({"b64": base64.b64encode(buf.getvalue()).decode(), "w": im.width, "h": im.height})
         elif c == "talk":
             want = bool(cmd.get("on"))
             if want != talk.TALK.on:
@@ -1192,6 +1209,13 @@ class Desk:
                 return reply(error=f"could not fork: {e}")
         elif c == "typing":
             self.last_input = time.monotonic()
+        elif c == "checkpoint":              # the Checkpoints panel: what that turn changed
+            return reply({"files": convert.checkpoint_files(list(self.agent.checkpoints), int(cmd.get("n") or 0), self.cwd)})
+        elif c == "bg":                      # the Tasks panel: list the background tasks, optionally stop one
+            if cmd.get("stop"):
+                tools.bg_stop(int(cmd["stop"]))
+                time.sleep(0.3)
+            return reply({"tasks": tools.bg_snapshot(int(cmd.get("open") or 0))})
         elif c == "mcp":
             from .. import mcp
             if cmd.get("reconnect"):

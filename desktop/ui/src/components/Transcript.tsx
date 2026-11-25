@@ -1,11 +1,11 @@
 // Everything shown in a conversation: messages, tool calls, command output, the working line.
 import { highlight } from "@/lib/markdown";
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Block, Checkpoint, Diff, Item, Todo } from "@/lib/types";
-import { renderMarkdown } from "@/lib/markdown";
+import { markdownBlocks, type MdBlock } from "@/lib/markdown";
 import { openExternal, openPath } from "@/lib/desktop";
 import { cn, copyText } from "@/lib/util";
-import { currentLive, useStore } from "@/lib/store";
+import { currentLive, useLiveInfo, useStore } from "@/lib/store";
 import { media, post } from "@/lib/api";
 import {
   Ban, Book, Bot, Check, ChevronDown, ChevronRight, Copy, FileText, Globe, ListTodo, Loader, Pencil, Plug, Rewind,
@@ -13,28 +13,70 @@ import {
   Alert, CircleX, Info,
 } from "./icons";
 import { Tip } from "./ui";
+import { Bloom, MarkSlot, Shimmer, WorkMark, type WorkKind } from "./WorkMarks";
 
 // ------------------------------------------------------------------ markdown with copy buttons and safe links
-/** While a reply streams, its text is parsed and highlighted again on every update, which is a long task on the page's
- *  one thread; every animation that is not run by the GPU (the working marks) freezes during it. So a streaming reply is
- *  redrawn at most every `ms` milliseconds; the text itself is always complete, only the drawing waits. */
-function useThrottled(value: string, ms: number, on: boolean): string {
-  const [v, setV] = useState(value);
-  const last = useRef(0);
-  useEffect(() => {
-    if (!on) return;
-    const wait = Math.max(0, ms - (Date.now() - last.current));
-    const t = window.setTimeout(() => { last.current = Date.now(); setV(value); }, wait);
-    return () => clearTimeout(t);
-  }, [value, on, ms]);
-  return on ? v : value;
+/** What a Markdown element shows: its pieces (markdownBlocks) and the elements each piece became. */
+type Drawn = { blocks: MdBlock[]; nodes: ChildNode[][] };
+
+/** Brings `el` up to `text` piece by piece: the pieces that did not change keep their elements as they are, only the
+ *  ones from the first change on are rebuilt. The pieces are placed straight in `el`, in order, exactly as one HTML string
+ *  would place them, so the .md styles (:first-child, p + p, …) apply as before. */
+function drawBlocks(el: HTMLElement, d: Drawn, text: string): void {
+  const next = markdownBlocks(text, d.blocks);
+  let k = 0;
+  while (k < next.length && k < d.blocks.length && next[k] === d.blocks[k]) k++;
+  if (k === next.length && k === d.blocks.length) return;
+  for (let i = k; i < d.nodes.length; i++) for (const n of d.nodes[i]) n.remove();
+  const nodes = d.nodes.slice(0, k);
+  const tpl = document.createElement("template");
+  for (let i = k; i < next.length; i++) {
+    tpl.innerHTML = next[i].html;
+    nodes.push(Array.from(tpl.content.childNodes));
+    el.append(tpl.content);
+  }
+  d.blocks = next;
+  d.nodes = nodes;
 }
 
+/** A reply, drawn piece by piece. While it streams only the piece that is still growing (the last paragraph, list or
+ *  code block) is parsed and redrawn, so an update costs as little at the end of a long reply as at its start, and the
+ *  text already on screen is never rebuilt: nothing above it re-lays out and a selection in it survives. Redraws come at
+ *  most every 40 ms (less often when one is slow, e.g. a long code block), the newest text each time. */
 export const Markdown = memo(function Markdown({ text, className, streaming }: { text: string; className?: string; streaming?: boolean }) {
-  const shown = useThrottled(text, 120, !!streaming);
-  const html = useMemo(() => renderMarkdown(shown), [shown]);
+  const box = useRef<HTMLDivElement>(null);
+  const drawn = useRef<Drawn>({ blocks: [], nodes: [] });
+  const latest = useRef(text);
+  latest.current = text;
+  const pace = useRef({ timer: 0, at: 0, cost: 0 });
+  const redraw = useCallback(() => {
+    const p = pace.current;
+    p.timer = 0;
+    if (!box.current) return;
+    const t0 = performance.now();
+    drawBlocks(box.current, drawn.current, latest.current);
+    p.at = performance.now();
+    p.cost = p.at - t0;
+  }, []);
+  useLayoutEffect(() => {
+    const p = pace.current;
+    if (!streaming) {                          // finished (or never streamed): the whole text now, before it is painted
+      clearTimeout(p.timer);
+      redraw();
+      return;
+    }
+    if (p.timer) return;                       // a redraw is already on its way and takes the newest text
+    const wait = Math.max(40, p.cost * 4) - (performance.now() - p.at);
+    if (wait <= 0) redraw();
+    else p.timer = window.setTimeout(redraw, wait);
+  }, [text, streaming, redraw]);
+  useEffect(() => () => {
+    clearTimeout(pace.current.timer);
+    pace.current.timer = 0;
+  }, []);
   return (
     <div
+      ref={box}
       className={cn("md selectable", className)}
       onClick={(e) => {
         const t = e.target as HTMLElement;
@@ -55,7 +97,6 @@ export const Markdown = memo(function Markdown({ text, className, streaming }: {
           else openPath(href).catch(() => {});
         }
       }}
-      dangerouslySetInnerHTML={{ __html: html }}
     />
   );
 });
@@ -217,16 +258,16 @@ function spoken(md: string): string {
 
 /** The row under the last reply of a turn, as in Claude Code: copy, fork from here, pin, read aloud, and when. */
 function ReplyActions({ item }: { item: Extract<Item, { kind: "assistant" }> }) {
-  const live = useStore((s) => currentLive(s));
+  const live = useLiveInfo();                                        // not the whole session: this row must not redraw on every word
   const rawPins = useStore((s) => s.settings.desktop_pinned);       // the stored value itself (a fresh [] would loop)
   const pins: string[] = Array.isArray(rawPins) ? rawPins : [];
-  const pinned = !!live?.sid && pins.includes(live.sid);
+  const pinned = !!live.sid && pins.includes(live.sid);
   const [copied, setCopied] = useState(false);
   const [forking, setForking] = useState(false);
   const btn = "flex h-[18px] w-[18px] items-center justify-center rounded-[4px] text-text-300 transition-colors hover:bg-hover hover:text-text-100 disabled:opacity-40";
   const s = useStore.getState();
   const fork = async () => {
-    if (!live || forking) return;
+    if (!live.wid || forking) return;
     setForking(true);
     try {
       const r = await post<{ sid: string; cwd: string; title: string }>("/api/session/fork", { wid: live.wid, mi: item.mi ?? null });
@@ -241,11 +282,12 @@ function ReplyActions({ item }: { item: Extract<Item, { kind: "assistant" }> }) 
     }
   };
   const togglePin = () => {
-    if (!live?.sid) return;
-    s.setSetting("desktop_pinned", pinned ? pins.filter((x) => x !== live.sid) : [live.sid, ...pins]);
+    const sid = live.sid;
+    if (!sid) return;
+    s.setSetting("desktop_pinned", pinned ? pins.filter((x) => x !== sid) : [sid, ...pins]);
   };
   const speak = () => {
-    if (!live) return;
+    if (!live.wid) return;
     post("/api/session/voice_test", { wid: live.wid, text: spoken(item.text) })
       .then(() => s.toast("Reading it aloud…", "info"))
       .catch((e) => s.toast(e?.message || "Could not read it aloud", "error"));
@@ -258,15 +300,15 @@ function ReplyActions({ item }: { item: Extract<Item, { kind: "assistant" }> }) 
         </button>
       </Tip>
       <Tip content="Fork from here: a new session with the conversation up to this reply">
-        <button aria-label="Fork from here" className={btn} disabled={!live || forking} onClick={fork}><Split size={11} strokeWidth={1.9} className="rotate-90" /></button>
+        <button aria-label="Fork from here" className={btn} disabled={!live.wid || forking} onClick={fork}><Split size={11} strokeWidth={1.9} className="rotate-90" /></button>
       </Tip>
       <Tip content={pinned ? "Unpin this session" : "Pin this session to the top of the sidebar"}>
-        <button aria-label={pinned ? "Unpin" : "Pin"} className={cn(btn, pinned && "text-text-100")} disabled={!live?.sid} onClick={togglePin}>
+        <button aria-label={pinned ? "Unpin" : "Pin"} className={cn(btn, pinned && "text-text-100")} disabled={!live.sid} onClick={togglePin}>
           {pinned ? <PinOff size={11} strokeWidth={1.9} className="rotate-45" /> : <Pin size={11} strokeWidth={1.9} className="rotate-45" />}
         </button>
       </Tip>
       <Tip content="Read aloud in Emilie's voice">
-        <button aria-label="Read aloud" className={btn} disabled={!live} onClick={speak}><Volume size={11} strokeWidth={1.9} /></button>
+        <button aria-label="Read aloud" className={btn} disabled={!live.wid} onClick={speak}><Volume size={11} strokeWidth={1.9} /></button>
       </Tip>
       {item.at && <span className="ml-[9px] text-[11px] text-text-400">{ago(item.at)}</span>}
     </div>
@@ -462,7 +504,7 @@ function StepRow({ t, first }: { t: ToolItem; first: boolean }) {
 }
 
 /** What a sub-agent's step was, in words (its steps come as a label and a target, e.g. Glob with a pattern, Read with a path). */
-function childWords(c: { label?: string; target?: string }): { verb: string; subject: string; full: string } {
+export function childWords(c: { label?: string; target?: string }): { verb: string; subject: string; full: string } {
   const label = String(c.label || "").trim();
   const target = String(c.target || "").trim();
   const file = target.split(/[\\/]/).filter(Boolean).pop() || target;
@@ -611,6 +653,15 @@ export function groupItems(all: Item[]): Row[] {
   // an empty reply (the model said nothing between two tool calls) draws nothing, so it must not split the run either
   const items = all.filter((it) => !(it.kind === "assistant" && !it.streaming && !String(it.text || "").trim()));
   const groupable = (it: Item | undefined) => !!it && it.kind === "tool" && it.name !== "exit_plan_mode";
+  // A row is known by the id of its first item, not by where it is: a message that moves (a queued one whose turn
+  // starts) or goes away must not give every row after it a new key, which would rebuild all of them, replies and all.
+  // An id met again (it should not happen) gets a count.
+  const seen = new Map<string, number>();
+  const keyOf = (it: Item) => {
+    const n = seen.get(it.id) || 0;
+    seen.set(it.id, n + 1);
+    return n ? `${it.id}#${n}` : it.id;
+  };
   items.forEach((it, i) => {
     let next = i + 1;
     while (it.kind === "thinking" && items[next]?.kind === "thinking") next++;
@@ -618,12 +669,12 @@ export function groupItems(all: Item[]): Row[] {
     const last = out[out.length - 1];
     if (isLine(it)) {                       // what one command printed, line by line: one card (NoticeLines)
       if (last && "lines" in last) last.lines.push(it);
-      else out.push({ key: it.id + ":" + i, lines: [it] });
+      else out.push({ key: keyOf(it), lines: [it] });
       return;
     }
     if (joins && last && "group" in last) last.group.push(it);
-    else if (joins) out.push({ key: it.id + ":" + i, group: [it] });
-    else out.push({ key: it.id + ":" + i, item: it });
+    else if (joins) out.push({ key: keyOf(it), group: [it] });
+    else out.push({ key: keyOf(it), item: it });
   });
   return out;
 }
@@ -685,18 +736,23 @@ function ToolDetails({ item, flat }: { item: Extract<Item, { kind: "tool" }>; fl
 function ToolOutput({ item, flat }: { item: Extract<Item, { kind: "tool" }>; flat?: boolean }) {
   const n = item.name;
   const box = flat ? "overflow-hidden" : "mt-1 mb-2 ml-6 overflow-hidden rounded-lg border border-border-300 bg-bg-200";
-  if (item.diff && item.diff.text) return <div className={box}><DiffView diff={item.diff} /></div>;
+  const file = String(item.input?.path || item.input?.file_path || "");
+  if (item.diff && item.diff.text) return <div className={box}>{file && <FileBar path={file} />}<DiffView diff={item.diff} file={file || undefined} /></div>;
   if (n === "todo_write" && Array.isArray(item.input?.todos)) return <div className={cn(box, "p-3")}><TodoList todos={item.input.todos} /></div>;
   if (n === "exit_plan_mode") return <div className={cn(box, "p-4")}><Markdown text={String(item.input?.plan || "")} /></div>;
   const out = String(item.output || "");
   if (n === "bash" || n === "bash_bg" || n === "notebook_run") {
     const m = out.match(/^exit=(-?\d+)\n?/);
     const body = m ? out.slice(m[0].length) : out;
+    const cmd = String(item.input?.command || item.target || "");
     return (
       <div className={box}>
-        <div className="flex items-center gap-2 border-b border-border-200 px-3 py-2 font-mono text-[11.5px] text-text-200">
-          <span className="text-text-500">$</span><span className="min-w-0 flex-1 whitespace-pre-wrap break-all selectable">{item.input?.command || item.target}</span>
-          {m && <span className={cn("shrink-0 text-[10.5px]", m[1] === "0" ? "text-text-500" : "text-danger")}>exit {m[1]}</span>}
+        {/* the command in its own box (it scrolls when long), what it printed under it */}
+        <div className="relative m-2 rounded-[8px] border border-border-300 bg-bg-100">
+          <pre className="max-h-[220px] overflow-auto px-3 py-2 pr-14 font-mono text-[11.5px] leading-[1.5] text-text-200 whitespace-pre-wrap break-words selectable">
+            <span className="select-none text-text-500">$ </span><span dangerouslySetInnerHTML={{ __html: commandHtml(cmd) }} />
+          </pre>
+          {m && <span className={cn("absolute right-3 top-2 text-[10.5px]", m[1] === "0" ? "text-text-500" : "text-danger")}>exit {m[1]}</span>}
         </div>
         <Pre text={body || "(no output)"} />
       </div>
@@ -716,7 +772,10 @@ function ToolOutput({ item, flat }: { item: Extract<Item, { kind: "tool" }>; fla
       {input && !["read_file", "glob", "grep", "web_search", "web_fetch"].includes(n) && (
         <div className="border-b border-border-200"><Pre text={input} small /></div>
       )}
-      <Pre text={out || (item.status === "running" ? "Running…" : "(no output)")} />
+      {n === "read_file" && file && <FileBar path={file} />}
+      {out && (n === "read_file" || n === "grep")
+        ? <CodeOutput text={out} path={String(item.input?.path || item.target || "")} grep={n === "grep"} />
+        : <Pre text={out || (item.status === "running" ? "Running…" : "(no output)")} />}
     </div>
   );
 }
@@ -725,6 +784,60 @@ function Pre({ text, small }: { text: string; small?: boolean }) {
   return (
     <pre className={cn("max-h-[360px] overflow-auto px-3 py-2.5 font-mono leading-[1.5] text-text-200 whitespace-pre-wrap break-words selectable",
       small ? "text-[10.5px] text-text-400" : "text-[11.5px]")}>{text}</pre>
+  );
+}
+
+/** A command, coloured. A heredoc (python - <<'E' … E, cat > a.tsx <<EOF) has its body coloured in its own language. */
+function commandHtml(cmd: string): string {
+  const m = cmd.match(/^([^\n]*?<<-?\s*(['"]?)([A-Za-z_]\w*)\2[^\n]*)\n([\s\S]*?)\n(\3[ \t]*)(?=\n|$)([\s\S]*)$/);
+  if (!m) return highlight(cmd, "bash");
+  const [, head, , , body, end, rest] = m;
+  const redirect = head.match(/>\s*["']?[^\s"'<>]+\.([A-Za-z0-9]+)/);
+  const lang = redirect ? redirect[1].toLowerCase() : /\b(python3?|py)\b/.test(head) ? "py" : /\bnode\b/.test(head) ? "js" : "";
+  return [highlight(head, "bash"), highlight(body, lang || "txt"), highlight(end, "bash") + (rest ? commandHtml(rest.replace(/^\n/, "")).replace(/^/, "\n") : "")].join("\n");
+}
+
+/** The file a tool read or wrote, above its code: the path (relative to the project) opens it in the Files panel. */
+function FileBar({ path }: { path: string }) {
+  const cwd = useStore((st) => currentLive(st)?.cwd || "");
+  const [copied, setCopied] = useState(false);
+  const abs = /^([a-zA-Z]:[\\/]|[\\/])/.test(path) || !cwd ? path : `${cwd.replace(/[\\/]+$/, "")}\\${path.replace(/\//g, "\\")}`;
+  const root = cwd.replace(/[\\/]+$/, "").toLowerCase().replace(/\//g, "\\");
+  const norm = abs.replace(/\//g, "\\");
+  const shown = root && norm.toLowerCase().startsWith(root + "\\") ? norm.slice(root.length + 1) : norm;
+  const copy = () => { navigator.clipboard?.writeText(abs).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1400); }).catch(() => {}); };
+  return (
+    <div className="flex items-center gap-2 border-b border-border-200 px-3 py-1.5 text-[11.5px]">
+      <button onClick={() => useStore.getState().openFile(abs)} title={`Open ${abs} in the Files panel`}
+        className="min-w-0 flex-1 truncate text-left text-text-200 underline-offset-2 hover:text-text-000 hover:underline">{shown}</button>
+      <button onClick={copy} title="Copy the path" aria-label="Copy the path"
+        className="shrink-0 text-[10.5px] text-text-400 hover:text-text-100">{copied ? "Copied" : "Copy path"}</button>
+    </div>
+  );
+}
+
+/** Code a tool returned, coloured by the code theme: read_file ("  12<TAB>line") and grep ("path:12: line") keep their
+ *  numbers / paths dim, the code beside them is highlighted by the file's extension. Other lines stay plain. */
+function CodeOutput({ text, path, grep }: { text: string; path?: string; grep?: boolean }) {
+  const rows = useMemo(() => {
+    const extOf = (f: string) => (f.split(/[\\/]/).pop() || "").split(".").pop()?.toLowerCase() || "";
+    return text.split("\n").map((line) => {
+      const g = grep ? line.match(/^(.+?:\d+: )(.*)$/) : null;
+      if (g) return { head: g[1], html: highlight(g[2], extOf(g[1].replace(/:\d+: $/, ""))), plain: "" };
+      const m = !grep ? line.match(/^(\s*\d+)\t(.*)$/) : null;
+      if (m) return { head: m[1] + "  ", html: highlight(m[2], extOf(path || "")), plain: "" };
+      return { head: "", html: "", plain: line };
+    });
+  }, [text, path, grep]);
+  return (
+    <pre className="max-h-[360px] overflow-auto px-3 py-2.5 font-mono text-[11.5px] leading-[1.5] text-text-200 whitespace-pre-wrap break-words selectable">
+      {rows.map((l, i) => (
+        <div key={i} className={l.head && !grep ? "pl-[7ch] -indent-[7ch]" : undefined}>
+          {l.head && <span className="text-text-500">{l.head}</span>}
+          {l.html ? <span dangerouslySetInnerHTML={{ __html: l.html }} /> : l.plain || (l.head ? "" : "\u00a0")}
+        </div>
+      ))}
+    </pre>
   );
 }
 
@@ -947,27 +1060,8 @@ export function Blocks({ blocks, top }: { blocks: Block[]; top?: boolean }) {
 }
 
 // ------------------------------------------------------------------ "Cooking…" line while she works
-/** Emilie's working mark: a five-petal flower whose petals glow in turn (the lit one grows a little) while it slowly turns. */
-export function Bloom({ size = 16, mode = "think" }: { size?: number; mode?: "wait" | "think" | "reply" }) {
-  return (
-    <svg className={`bloom bloom-${mode} shrink-0`} width={size} height={size} viewBox="0 0 16 16" aria-hidden>
-      <g className="bloom-inner">
-        {[0, 1, 2, 3, 4].map((i) => (
-          <g key={i} transform={`rotate(${i * 72} 8 8)`}>
-            <ellipse className="bloom-petal" cx="8" cy="4.3" rx="1.8" ry="3.2" fill="currentColor"
-              style={{ animationDelay: `calc(${-i * 0.28}s * var(--ds, 1))` }} />
-          </g>
-        ))}
-        <circle cx="8" cy="8" r="1.5" fill="var(--bg-100)" opacity="0.85" />
-      </g>
-    </svg>
-  );
-}
+// The marks themselves (the flower, the pencil, the globe, the wrench, …) and their motion: WorkMarks.tsx.
 
-/** What she is drafting right now ("Writing index.html · 214 lines…"): the file in a small pill and how far it got,
- *  so a long write never looks like a frozen screen. The kind of work also swaps the flower for its own animated
- *  tool mark (see WorkIcon), in the same colour as the flower. */
-type WorkKind = "write" | "plan" | "command" | "helper" | "tool" | "read" | "search" | "web" | "connect";
 /** The mark for a tool that is RUNNING now (not only while it is being drafted). */
 export function toolKind(name: string): WorkKind {
   if (["write_file", "edit_file", "notebook_edit", "docx_edit", "docx_create", "xlsx_write"].includes(name)) return "write";
@@ -979,138 +1073,25 @@ export function toolKind(name: string): WorkKind {
   if (["web_fetch", "web_search"].includes(name)) return "web";
   return "tool";
 }
+/** What she is drafting right now ("Writing index.html · 214 lines…") also picks the mark for that kind of work. */
 const DRAFT_KINDS: [RegExp, WorkKind][] = [
   [/^connecting tools/i, "connect"],
   [/^Searching the web/, "web"], [/^Fetching /, "web"], [/^Searching /, "search"], [/^Reading /, "read"],
-    [/^Writing the plan/, "plan"], [/^Writing /, "write"], [/^Editing /, "write"], [/^Preparing a command/, "command"],
+  [/^Writing the plan/, "plan"], [/^Writing /, "write"], [/^Editing /, "write"], [/^Preparing a command/, "command"],
   [/^Planning /, "plan"], [/^Briefing /, "helper"], [/^Preparing /, "tool"],
 ];
-
-/** The flower's replacement while a tool is at work: one mark per kind of work, each with its OWN way of moving, and every
- *  loop is seamless (the last frame is the first frame, or fades out where the next starts), so nothing hitches.
- *  write: a pencil writes a line of handwriting and writes it back again · command: a window where a command is typed,
- *  cursor and all · plan: ticks draw themselves one after another · helper: a little robot bobbing, tilting, blinking ·
- *  tool: a wrench swinging at a bolt · read: a page scanned up and down · search: a magnifier orbiting a point ·
- *  web: a turning globe · connect: a plug sliding home with a spark. */
-function WorkIcon({ kind, size = 22 }: { kind: WorkKind; size?: number }) {
-  const common = { className: "work-icon shrink-0", width: size, height: size, viewBox: "0 0 16 16", fill: "none",
-    stroke: "currentColor", strokeWidth: 0.75, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true };
-  switch (kind) {
-    case "write": {
-      // One cycle (3 s): the pencil writes the line (its tip is exactly the end of the ink: animateMotion and
-      // stroke-dashoffset share one timing), rests a moment, then the line AND the pencil fade away together; while both
-      // are invisible the pencil goes back to the start and fades in again. The ink is never "un-written" by the pencil.
-      const ink = "M1 13.5c1-1.8 2-1.8 3 0s2 1.8 3 0 2-1.8 2.6-.4";
-      const base = { dur: "3s", repeatCount: "indefinite", calcMode: "spline" as const };
-      const ease = ".7 0 .2 1", flat = "0 0 1 1";
-      return (
-        <svg {...common} width={size * 1.45} height={size * 0.95} viewBox="0 3 20 13" style={{ overflow: "visible" }}>
-          {/* butt caps: with round caps a dash of length 0 would still show as a dot */}
-          <path d={ink} pathLength={1} strokeDasharray="1 1" strokeDashoffset="1" strokeWidth="0.9" strokeLinecap="butt" opacity="0">
-            <animate attributeName="stroke-dashoffset" values="1;0;0;1" keyTimes="0;0.5;0.92;1" keySplines={`${ease};${flat};${flat}`} {...base} />
-            <animate attributeName="opacity" values="1;1;0;0" keyTimes="0;0.66;0.9;1" keySplines={`${flat};.4 0 .6 1;${flat}`} {...base} />
-          </path>
-          <g opacity="0">
-            <animateMotion path={ink} keyPoints="0;1;1;0" keyTimes="0;0.5;0.92;1" keySplines={`${ease};${flat};${flat}`} {...base} />
-            <animate attributeName="opacity" values="0;1;1;0;0" keyTimes="0;0.05;0.66;0.9;1" keySplines={`${flat};${flat};.4 0 .6 1;${flat}`} {...base} />
-            <path d="M0 0L3.2-1.1 7.5-5.3 5.3-7.5 1.1-3.2zM3.2-1.1L1.1-3.2" fill="currentColor" fillOpacity="0.28" strokeWidth="0.7" />
-          </g>
-        </svg>
-      );
-    }
-    case "command":
-      return (
-        <svg {...common}>
-          <rect x="1.5" y="3" width="13" height="10" rx="2" />
-          <path className="wi-prompt" d="M4 6.6l2 1.7-2 1.7" />
-          <path className="wi-type" d="M8 10h4.6" />
-          <rect className="wi-caret" x="7.9" y="6.6" width="1.3" height="2.6" rx="0.4" fill="currentColor" stroke="none" />
-        </svg>
-      );
-    case "plan":
-      return (
-        <svg {...common}>
-          {[0, 1, 2].map((i) => (
-            <g key={i}>
-              <path className="wi-check" pathLength={1} d={`M2 ${4 + i * 4}l1.3 1.3 2.3-2.6`} style={{ animationDelay: `${i * 0.4}s` }} />
-              <path d={`M8 ${4 + i * 4}h6`} opacity="0.5" />
-            </g>
-          ))}
-        </svg>
-      );
-    case "helper":
-      return (
-        <svg {...common}>
-          <g className="wi-bob">
-            <g className="wi-tilt">
-              <rect x="3" y="6" width="10" height="7" rx="2.4" />
-              <path d="M8 6V3.6M1.6 9v1.6M14.4 9v1.6" />
-              <circle className="wi-led" cx="8" cy="2.8" r="0.9" fill="currentColor" />
-              <ellipse className="wi-eye" cx="6" cy="9.4" rx="0.75" ry="0.95" fill="currentColor" stroke="none" />
-              <ellipse className="wi-eye" cx="10" cy="9.4" rx="0.75" ry="0.95" fill="currentColor" stroke="none" />
-              <path d="M6.6 11.4q1.4.8 2.8 0" strokeWidth="0.65" />
-            </g>
-          </g>
-        </svg>
-      );
-    case "read":
-      return (
-        <svg {...common}>
-          <path d="M3.8 1.8h5.4l3.5 3.5v8.9H3.8z" /><path d="M9 1.8v3.6h3.7" />
-          {[0, 1, 2].map((i) => <path key={i} className="wi-line" d={`M5.8 ${7 + i * 2.2}h${4.4 - i}`} style={{ animationDelay: `${i * 0.25}s` }} />)}
-          <path className="wi-scan" d="M3 6.4h10" strokeWidth="0.65" />
-        </svg>
-      );
-    case "search":
-      return (
-        <svg {...common}>
-          <circle cx="8" cy="8" r="4" strokeDasharray="0.7 2" opacity="0.4" strokeWidth="0.55" />
-          <g className="wi-orbit">
-            <g className="wi-lens"><circle cx="8" cy="4" r="2.2" /><path d="M9.6 5.6l1.9 1.9" /></g>
-          </g>
-        </svg>
-      );
-    case "web":
-      return (
-        <svg {...common}>
-          <circle cx="8" cy="8" r="6" />
-          <path d="M2.4 5.8h11.2M2.4 10.2h11.2" opacity="0.5" />
-          <ellipse className="wi-spin" cx="8" cy="8" rx="3.2" ry="6" />
-          <ellipse className="wi-spin b" cx="8" cy="8" rx="3.2" ry="6" />
-        </svg>
-      );
-    case "connect":
-      return (
-        <svg {...common}>
-          <path d="M13 5.2v5.6M13 8h2" />
-          <g className="wi-plug">
-            <path d="M3.4 8H1M3.6 5.4h4.4v5.2H3.6zM8 6.6h2.4M8 9.4h2.4" />
-          </g>
-          <path className="wi-spark" d="M11.6 2.8l-.5 1.6M14.2 3.8l-1.2 1M14.2 12.2l-1.2-1" />
-        </svg>
-      );
-    default:
-      return (
-        <svg {...common}>
-          <g className="wi-swing">
-            <path d="M10.4 2a3.4 3.4 0 0 0-3.1 4.6L2.3 11.6a1.4 1.4 0 0 0 2 2l5-5A3.4 3.4 0 0 0 14 5.6l-2.1 2.1-1.9-.4-.4-1.9z" />
-          </g>
-        </svg>
-      );
-  }
-}
 
 function DraftLine({ text }: { text: string }) {
   const m = text.match(/^(Writing|Editing) (?!the plan)(.+?)(?: · (.+?))?…$/);
   return (
-    <span className="flex min-w-0 items-center gap-1.5">
+    <span className="flex min-w-0 items-center gap-1.5 whitespace-nowrap">
       {m ? (
         <>
-          <span className="shimmer-text">{m[1]}</span>
+          <Shimmer>{m[1]}</Shimmer>
           <span className="max-w-[260px] truncate rounded-[5px] border border-border-300 bg-bg-200 px-1.5 font-mono text-[11px] text-text-200">{m[2]}</span>
           {m[3] && <span className="tabular-nums text-text-500">{m[3]}</span>}
         </>
-      ) : <span className="shimmer-text">{text.charAt(0).toUpperCase() + text.slice(1)}</span>}
+      ) : <Shimmer>{text.charAt(0).toUpperCase() + text.slice(1)}</Shimmer>}
     </span>
   );
 }
@@ -1164,8 +1145,8 @@ export function Working({ since, activity, thinking, voice, voiceOn, streaming, 
   if (step) {
     return (
       <div className="flex h-6 items-center gap-2 text-[12px]" aria-live="polite">
-        <Bloom />
-        <span key={step} className="word-in min-w-0"><span className={voice === "speaking" ? "text-text-200" : "shimmer-text"}>{step}</span></span>
+        <MarkSlot id="bloom"><Bloom mode={voice === "speaking" ? "reply" : "think"} /></MarkSlot>
+        <span key={step} className="word-in min-w-0">{voice === "speaking" ? <span className="text-text-200">{step}</span> : <Shimmer>{step}</Shimmer>}</span>
         {voice === "speaking" && <span className="eq" aria-hidden="true"><i /><i /><i /><i /></span>}
         <Elapsed since={since} />
       </div>
@@ -1181,10 +1162,15 @@ export function Working({ since, activity, thinking, voice, voiceOn, streaming, 
     : (tool ? toolWord(tool) : activity) || (thinking ? "Thinking…" : replying ? "Writing the reply…" : hasGroup ? "Working…" : "Waiting for the model…");
   const kind = running ? toolKind(running.name) : tool ? toolKind(tool) : activity ? DRAFT_KINDS.find(([re]) => re.test(activity))?.[1]
     : hasGroup && !thinking && !replying && lastTool ? toolKind(lastTool.name) : undefined;
-  const mark = kind ? <WorkIcon kind={kind} /> : <Bloom mode={thinking ? "think" : replying ? "reply" : "wait"} />;
+  // the flower, or the mark of the work going on; a new kind of work springs in while the old mark shrinks away
+  const mark = (
+    <MarkSlot id={kind || "bloom"}>
+      {kind ? <WorkMark kind={kind} /> : <Bloom mode={thinking ? "think" : replying ? "reply" : "wait"} />}
+    </MarkSlot>
+  );
   const label = (
     <span key={activity && !tool ? "draft" : word} className="word-in min-w-0">
-      {activity && !tool ? <DraftLine text={activity} /> : <span className="shimmer-text">{word}</span>}
+      {activity && !tool ? <DraftLine text={activity} /> : <Shimmer>{word}</Shimmer>}
     </span>
   );
   if (hasGroup || hasThought) {

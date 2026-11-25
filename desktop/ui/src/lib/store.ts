@@ -1,12 +1,13 @@
 // App state (zustand). Every event from the server goes through onEvent() and updates one session ("live").
 import { create } from "zustand";
+import { useShallow } from "zustand/react/shallow";
 import { get as apiGet, post } from "./api";
 import { bridge, notify } from "./desktop";
 import type { AppState, Folder, Item, Live, ModelRow, Request, Section, SessionMeta, Status, View } from "./types";
 import { type Attachment, basename, uid } from "./util";
 import { runInApp } from "./slash";
 
-export type PaneKind = "files" | "terminal" | "browser" | "diff";
+export type PaneKind = "files" | "terminal" | "browser" | "diff" | "tasks" | "checkpoints";
 export interface PaneTab { key: string; kind: PaneKind | "file"; path?: string; title: string }
 
 export type SearchTab = "all" | "artifacts" | "chats" | "code" | "projects" | "scheduled";
@@ -116,6 +117,7 @@ export const useStore = create<Store>()((set, get) => {
     sessionsTimer = window.setTimeout(() => get().refreshSessions(), 400);
   };
   const addLive = (r: any): string => {
+    applyEvents();                       // what arrived before this answer goes first (as it did before events waited for a frame)
     const wid = r.wid as string;
     const snap = r.snapshot || {};
     const live = LIVE(wid, {
@@ -265,6 +267,7 @@ export const useStore = create<Store>()((set, get) => {
       if (!l || l.loaded) return;
       try {
         const [snap, commands] = await Promise.all([post("/api/session/snapshot", { wid }), post("/api/session/commands", { wid })]);
+        applyEvents();                   // a piece of a reply that arrived before the snapshot must not be added after it again
         patch(wid, (x) => ({ ...x, items: snap.items || [], todos: snap.todos || [], request: snap.request || null,
           busy: !!snap.busy, commands: commands || x.commands, loaded: true,
           working: snap.busy ? x.working || { since: Date.now(), tokens: 0, streaming: !!snap.stream_id } : null }));
@@ -452,7 +455,7 @@ export const useStore = create<Store>()((set, get) => {
         return set({ paneTabs: rest, paneActive: next?.key || null, pane: (next?.kind === "file" ? "files" : next?.kind as PaneKind) || null,
           paneMax: rest.length ? get().paneMax : false });
       }
-      const title = { files: "Files", terminal: "Terminal", browser: "Browser", diff: "Changes" }[p];
+      const title = { files: "Files", terminal: "Terminal", browser: "Browser", diff: "Changes", tasks: "Tasks", checkpoints: "Checkpoints" }[p];
       set({ paneTabs: [...tabs, { key: p, kind: p, title }], paneActive: p, pane: p });
     },
     openFile(path) {
@@ -690,6 +693,63 @@ export const useStore = create<Store>()((set, get) => {
 });
 
 export const currentLive = (s: Store): LiveX | null => (s.view.kind === "session" ? s.lives[s.view.wid] || null : null);
+
+export interface LiveInfo { wid: string | null; sid: string | null; cwd: string; title: string; closed: boolean; hasItems: boolean }
+
+/** The few things about the session on screen that the parts AROUND the conversation show (title bar, sidebar, menus).
+ *  The whole session (currentLive) is a new object on every word of a reply; a component reading it redraws ~20 times
+ *  a second while she writes. This one redraws only when one of these fields changes. */
+export function useLiveInfo(): LiveInfo {
+  return useStore(useShallow((s): LiveInfo => {
+    const l = currentLive(s);
+    return { wid: l?.wid ?? null, sid: l?.sid ?? null, cwd: l?.cwd ?? "", title: l?.title ?? "", closed: !!l?.closed, hasItems: !!l?.items.length };
+  }));
+}
+
+/** useLiveInfo for the parts that show nothing without a session: null then (and `wid` is set otherwise). */
+export function useLiveOnScreen(): (LiveInfo & { wid: string }) | null {
+  const info = useLiveInfo();
+  return info.wid ? (info as LiveInfo & { wid: string }) : null;
+}
+
+// ------------------------------------------------------------------ server events, a frame at a time
+// While she writes, the server sends a piece of the reply every 50 ms, plus progress, activity and status lines, each as
+// its own message. Applied one by one, every message would redraw the window on its own. They are queued and applied
+// together once per frame instead (one redraw for all of them), and pieces of the same reply that arrived together are
+// joined into one. A hidden window gets no frames: a timer applies them then.
+let evQueue: any[] = [];
+let evFrame = 0;
+let evTimer = 0;
+
+function applyEvents(): void {
+  cancelAnimationFrame(evFrame);
+  clearTimeout(evTimer);
+  evFrame = evTimer = 0;
+  const batch = evQueue;
+  evQueue = [];
+  const { onEvent } = useStore.getState();
+  for (let i = 0; i < batch.length; i++) {
+    let ev = batch[i];
+    if (ev?.t === "delta") {
+      let text = ev.text;
+      while (batch[i + 1]?.t === "delta" && batch[i + 1].wid === ev.wid && batch[i + 1].id === ev.id) text += batch[++i].text;
+      if (text !== ev.text) ev = { ...ev, text };
+    }
+    try {
+      onEvent(ev);
+    } catch (e) {
+      console.error("event", ev?.t, e);
+    }
+  }
+}
+
+/** Hand a server event to the store (applied with the others of this frame). */
+export function queueEvent(ev: any): void {
+  evQueue.push(ev);
+  if (evFrame || evTimer) return;
+  evFrame = requestAnimationFrame(applyEvents);
+  evTimer = window.setTimeout(applyEvents, 100);
+}
 
 /** The session in view or, on a page such as Customize, the session the user came from (null if they came from New). */
 export const recentLive = (s: Store): LiveX | null => {

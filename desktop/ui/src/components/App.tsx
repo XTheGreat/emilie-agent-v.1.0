@@ -1,7 +1,7 @@
 import { useShallow } from "zustand/react/shallow";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { TooltipPrimitive } from "./ui";
-import { useStore, currentLive } from "@/lib/store";
+import { useStore, currentLive, queueEvent, useLiveInfo } from "@/lib/store";
 import { connectEvents } from "@/lib/api";
 import { bridge, type JumpAction } from "@/lib/desktop";
 import { openPicker } from "@/lib/slash";
@@ -29,7 +29,7 @@ export function App() {
     const s = useStore.getState();
     s.init();
     return connectEvents(
-      (ev) => useStore.getState().onEvent(ev),
+      queueEvent,                                    // applied once per frame, not one redraw per message
       (again) => {
         useStore.setState({ connected: true });
         if (again) {
@@ -95,8 +95,10 @@ function useJumpList() {
 }
 
 function Shell() {
-  const s = useStore(useShallow((st) => ({ connected: st.connected, envFloat: st.envFloat, home: st.home, paneMax: st.paneMax, paneTabs: st.paneTabs, scratch: st.scratch, send: st.send, setSetting: st.setSetting, settings: st.settings, settingsOpen: st.settingsOpen, state: st.state, view: st.view })));
-  const live = useStore((st) => currentLive(st));
+  const s = useStore(useShallow((st) => ({ connected: st.connected, envFloat: st.envFloat, home: st.home, paneMax: st.paneMax, paneTabs: st.paneTabs, scratch: st.scratch, setSetting: st.setSetting, settings: st.settings, settingsOpen: st.settingsOpen, state: st.state, view: st.view })));
+  // only what the frame needs: the conversation reads the session itself (LiveSession), so a reply being written
+  // redraws the conversation, not the title bar, sidebar and panels around it
+  const live = useLiveInfo();
   useJumpList();
   const sidebar = s.settings.desktop_sidebar !== false;
   const [sidebarW, setSidebarW] = useState<number>(Number(s.settings.desktop_sidebar_width) || 220);
@@ -111,7 +113,7 @@ function Shell() {
   const winW = useWindowWidth();
   const paneOpen = s.paneTabs.length > 0;
   const sideW = sidebar ? sidebarW : 0;
-  const inSession = s.view.kind === "session" && !!live;
+  const inSession = s.view.kind === "session" && !!live.wid;
   const envDockable = inSession && !paneOpen && winW - sideW - ENV_W >= MAIN_MIN;
   const envShown = envDockable && s.settings.desktop_env_panel !== false;
   const envFloat = inSession && !envDockable && s.envFloat && !(s.paneMax && paneOpen);
@@ -125,18 +127,19 @@ function Shell() {
       {!s.connected && <div className="bg-warn-soft py-1 text-center text-[11.5px] text-warn">Reconnecting to Emilie's background process…</div>}
       <div className="flex min-h-0 flex-1">
         {sidebar && <Sidebar width={sidebarW} />}
-        {sidebar && <Resizer value={sidebarW} min={180} max={420} onChange={setSidebarW} onDone={(w) => s.setSetting("desktop_sidebar_width", w)} />}
-        <Pane cwd={live?.cwd || (s.home.chat ? s.scratch : s.home.cwd) || s.state?.home || ""} chatTitle={(inSession && live?.title) || "Conversation"}
+        {sidebar && <Resizer value={sidebarW} min={180} max={420} onChange={setSidebarW} onDone={(w) => s.setSetting("desktop_sidebar_width", w)}
+          closeBelow={130} onClose={() => s.setSetting("desktop_sidebar", false)} />}
+        <Pane cwd={live.cwd || (s.home.chat ? s.scratch : s.home.cwd) || s.state?.home || ""} chatTitle={(inSession && live.title) || "Conversation"}
           chat={(
             <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-bg-100">
-              {s.view.kind === "session" && live ? <SessionView live={live} envFloat={envFloat} />
+              {s.view.kind === "session" && live.wid ? <LiveSession wid={live.wid} envFloat={envFloat} />
                 : s.view.kind === "projects" ? <ProjectsPage />
                   : s.view.kind === "artifacts" ? <ArtifactsPage />
                     : s.view.kind === "customize" ? <CustomizePage tab={s.view.tab} />
                       : <Home />}
             </main>
           )} />
-        {envShown && live && <EnvPanel live={live} onCommand={(cmd) => s.send(live.wid, cmd, [], [])} />}
+        {envShown && live.wid && <DockedEnvPanel wid={live.wid} />}
       </div>
       {s.settingsOpen && <Settings />}
       <Dialogs />
@@ -144,6 +147,19 @@ function Shell() {
       {hasKey === false && <Onboarding />}
     </div>
   );
+}
+
+/** The session on screen: read here, so its changes (every piece of a reply) redraw the conversation only. */
+function LiveSession({ wid, envFloat }: { wid: string; envFloat: boolean }) {
+  const live = useStore((st) => st.lives[wid]);
+  return live ? <SessionView live={live} envFloat={envFloat} /> : null;
+}
+
+/** The Environment panel docked on the right (it skips the redraws that do not change what it shows: see EnvPanel). */
+function DockedEnvPanel({ wid }: { wid: string }) {
+  const live = useStore((st) => st.lives[wid]);
+  const onCommand = useCallback((cmd: string) => { useStore.getState().send(wid, cmd, [], []); }, [wid]);
+  return live ? <EnvPanel live={live} onCommand={onCommand} /> : null;
 }
 
 const MAIN_MIN = 380;      // the conversation column never gets narrower than this
@@ -160,8 +176,9 @@ function useWindowWidth() {
   return w;
 }
 
-export function Resizer({ value, min, max, onChange, onDone, side = "right" }: {
+export function Resizer({ value, min, max, onChange, onDone, side = "right", closeBelow, onClose }: {
   value: number; min: number; max: number; onChange: (v: number) => void; onDone: (v: number) => void; side?: "right" | "left";
+  closeBelow?: number; onClose?: () => void;     // dragged narrower than this it looks shut; letting go there really closes it
 }) {
   const start = useRef<{ x: number; w: number } | null>(null);
   return (
@@ -170,11 +187,14 @@ export function Resizer({ value, min, max, onChange, onDone, side = "right" }: {
       onMouseDown={(e) => {
         e.preventDefault();
         start.current = { x: e.clientX, w: value };
-        let last = value;
+        let last = value, closing = false;
         const move = (ev: MouseEvent) => {
           if (ev.buttons === 0) { up(); return; }           // the release was missed (a page under the pointer)
           const d = ev.clientX - start.current!.x;
-          last = Math.max(min, Math.min(max, start.current!.w + (side === "right" ? d : -d)));
+          const raw = start.current!.w + (side === "right" ? d : -d);
+          closing = !!closeBelow && !!onClose && raw < closeBelow;
+          if (closing) { onChange(0); return; }              // it looks shut; dragging back wider before letting go opens it again
+          last = Math.max(min, Math.min(max, raw));
           onChange(last);
         };
         const up = () => {
@@ -183,6 +203,7 @@ export function Resizer({ value, min, max, onChange, onDone, side = "right" }: {
           window.removeEventListener("blur", up);
           document.body.style.cursor = "";
           document.body.classList.remove("dragging");
+          if (closing) { onChange(start.current!.w); onClose!(); return; }     // let go while shut: now it really closes
           onDone(last);
         };
         document.body.style.cursor = "col-resize";

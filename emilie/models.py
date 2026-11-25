@@ -40,6 +40,25 @@ BANKAI_VISION = {"claude-opus-5", "claude-opus-5-5", "claude-sonnet-5", "gemini-
 
 import re as _re
 
+# Model names that are text-only (no image input). Anything not matched is assumed to be able to try: a wrong "no" would
+# stop a user from sending a picture to a model that could read it, so only names I am sure about are listed.
+_TEXT_ONLY = _re.compile(
+    r"deepseek-(chat|coder|v[23])|deepseek-r1(?!.*vl)|gpt-3\.5|o1-mini|o3-mini|mistral-7b|codellama|starcoder|"
+    r"llama-?[23](?!.*vision)|qwen-?2\.5-coder|qwen-?3-coder|glm-4(?!.*v)|command-r|phi-[23](?!.*vision)|gemma-?[12](?!.*vision)", _re.I)
+
+
+def sees_images(name: str, profile: dict | None = None) -> bool | None:
+    """True / False when it is known whether the model takes images, None when it is not."""
+    v = (profile or {}).get("vision")
+    if v is not None:
+        return bool(v)
+    low = (name or "").lower()
+    if low in BANKAI_VISION or "vision" in low or "-vl" in low or "4o" in low or low.startswith(("claude", "gemini")):
+        return True
+    if _TEXT_ONLY.search(low):
+        return False
+    return None
+
 # Context windows I am sure about, for models too small for the effort levels' limits. Anything else is unknown (None):
 # set it yourself with /config context_limit <tokens>. Matched against the lower-cased model name.
 _SMALL_CONTEXT = [

@@ -2,11 +2,11 @@
 // 27px high, the sidebar's colour and divider continue into it, back/forward are chevrons, Chat/Code is a segmented switch.
 import { useShallow } from "zustand/react/shallow";
 import { useEffect, useState } from "react";
-import { useStore, currentLive, type PaneKind } from "@/lib/store";
+import { useStore, useLiveOnScreen, type PaneKind } from "@/lib/store";
 import { get as apiGet, post } from "@/lib/api";
 import { bridge, isElectron, isMac, openPath } from "@/lib/desktop";
 import { cn } from "@/lib/util";
-import { ChatBubble, ChevD, ChevL, ChevR, CodeBrackets, DiffBox, Dots, FolderSm, GlobeSm, ListIcon, MenuLines, Prompt, SidebarToggle } from "./icons";
+import { ChatBubble, ChevD, ChevL, ChevR, CodeBrackets, DiffBox, Dots, FolderSm, GlobeSm, ListIcon, ListTodo, MenuLines, Rewind, Prompt, SidebarToggle } from "./icons";
 import { Menu, MenuContent, MenuItem, MenuSep, MenuTrigger, Tip } from "./ui";
 
 export const TITLEBAR_H = 27;
@@ -25,8 +25,8 @@ function TBtn({ children, active, disabled, onClick, label, className }: {
 
 export function TitleBar({ sidebarW, envDockable, envOpen }: { sidebarW: number; envDockable: boolean; envOpen: boolean }) {
   const s = useStore(useShallow((st) => ({ back: st.back, envFloat: st.envFloat, fwd: st.fwd, goBack: st.goBack, goForward: st.goForward, home: st.home, navigate: st.navigate, paneTabs: st.paneTabs, setHome: st.setHome, setSetting: st.setSetting, settings: st.settings, view: st.view })));
-  const live = useStore((st) => currentLive(st));
-  const hasChat = !!live && live.items.length > 0;
+  const live = useLiveOnScreen();                  // not the whole session: the title bar must not redraw on every word of a reply
+  const hasChat = !!live && live.hasItems;
   const sidebar = s.settings.desktop_sidebar !== false;
   const chat = s.home.chat;
   const title = live ? live.title || "New session" : s.view.kind === "projects" ? "Projects"
@@ -87,6 +87,8 @@ export function TitleBar({ sidebarW, envDockable, envOpen }: { sidebarW: number;
         {live && <PaneBtn kind="diff" tip="Changes" active={isOpen("diff")}><DiffBox /></PaneBtn>}
         <PaneBtn kind="browser" tip="Browser" active={isOpen("browser")}><GlobeSm /></PaneBtn>
         <PaneBtn kind="files" tip="Files  Ctrl+Shift+E" active={isOpen("files")}><FolderSm /></PaneBtn>
+        {live && <PaneBtn kind="tasks" tip="Tasks: background processes and sub-agents" active={isOpen("tasks")}><ListTodo size={13} /></PaneBtn>}
+        {live && <PaneBtn kind="checkpoints" tip="Checkpoints: what each turn changed, and going back" active={isOpen("checkpoints")}><Rewind size={13} /></PaneBtn>}
         {live && <MoreMenu />}
         {isElectron && !isMac && <WindowControls />}
       </div>
@@ -97,7 +99,7 @@ export function TitleBar({ sidebarW, envDockable, envOpen }: { sidebarW: number;
 /** The session title with its menu (rename, folder, export, close), like Claude's "title ∨". */
 export function SessionTitle() {
   const s = useStore(useShallow((st) => ({ closeSession: st.closeSession, deleteSession: st.deleteSession, send: st.send, sessions: st.sessions })));
-  const live = useStore((st) => currentLive(st));
+  const live = useLiveOnScreen();
   const [wt, setWt] = useState(false);                       // this session's folder is a git worktree
   const cwd = live?.cwd || "";
   useEffect(() => {
@@ -145,7 +147,7 @@ export function SessionTitle() {
 
 function MoreMenu() {
   const s = useStore(useShallow((st) => ({ send: st.send })));
-  const live = useStore((st) => currentLive(st));
+  const live = useLiveOnScreen();
   if (!live) return null;
   const run = (cmd: string) => s.send(live.wid, cmd, [], []);
   return (

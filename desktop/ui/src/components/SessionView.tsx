@@ -5,6 +5,7 @@ import type { Item, Live, Todo } from "@/lib/types";
 import { post } from "@/lib/api";
 import { cn } from "@/lib/util";
 import { ArrowUp, Alert, Refresh } from "./icons";
+import { CallWindow } from "./CallWindow";
 import { Composer } from "./Composer";
 import { EnvPanel } from "./EnvPanel";
 import { ContextRing, ModeChip, ModelEffortChip } from "./Pickers";
@@ -19,6 +20,14 @@ export function SessionView({ live, envFloat }: { live: Live & { loaded?: boolea
   const scroller = useRef<HTMLDivElement>(null);
   const dock = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  // Following the bottom turns the browser's scroll anchoring off. Anchoring keeps what is on screen in place when rows
+  // above it change: past 80 rows the oldest row leaves the top as each new one arrives, the browser scrolls up by its
+  // height, and when the new row is as tall as the old one nothing changes size to say "follow": the newest line (and the
+  // working line) slid under the message box. Off while pinned to the bottom; on while the user reads further up.
+  const pin = (on: boolean) => {
+    stick.current = on;
+    if (scroller.current) scroller.current.style.overflowAnchor = on ? "none" : "";
+  };
   const [showJump, setShowJump] = useState(false);
   const [dockH, setDockH] = useState(96);
   const typingAt = useRef(0);
@@ -46,6 +55,10 @@ export function SessionView({ live, envFloat }: { live: Live & { loaded?: boolea
     return live.busy && live.working && !live.request && last && "group" in last ? last.group : undefined;   // stays live in the gaps between tool calls, until she starts writing
   }, [rows, live.busy, live.working, live.request]);
   const taskLists = useMemo(() => tasksByTurn(rows), [rows]);
+  // the same list as before while its contents are the same: the rows and the message box below are memoized and
+  // must not redraw because a status line or a piece of a reply rebuilt these arrays
+  const cps = live.status.checkpoints;
+  const checkpoints = useSame(cps, (cps || []).map((c) => `${c.n}:${c.mark}`).join(","));
   const [cap, setCap] = useState(80);
   useEffect(() => { setCap(80); }, [live.wid]);
   const start = Math.max(0, rows.length - cap);
@@ -62,7 +75,8 @@ export function SessionView({ live, envFloat }: { live: Live & { loaded?: boolea
     });
     return out;
   }, [items, live.busy, voiceBusy]);
-  const history = useMemo(() => items.filter((i) => i.kind === "user").map((i: any) => String(i.text)).filter(Boolean).slice(-50), [items]);
+  const historyNow = useMemo(() => items.filter((i) => i.kind === "user").map((i: any) => String(i.text)).filter(Boolean).slice(-50), [items]);
+  const history = useSame(historyNow, historyNow.join("\u0001"));
 
   // follow the bottom while new output arrives, unless the user scrolled up
   // (not on every render: reading scrollHeight forces a layout of the whole column; the column's own size tells when to follow)
@@ -77,7 +91,7 @@ export function SessionView({ live, envFloat }: { live: Live & { loaded?: boolea
     return () => ro.disconnect();
   }, [live.wid]);
   useEffect(() => {
-    stick.current = true;
+    pin(true);
     requestAnimationFrame(() => {
       const el = scroller.current;
       if (el) el.scrollTop = el.scrollHeight;
@@ -96,12 +110,12 @@ export function SessionView({ live, envFloat }: { live: Live & { loaded?: boolea
       const el = scroller.current;
       if (!el) return;
       const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
-      if (dragging.current) stick.current = gap < 6;
-      else if (gap < 6) stick.current = true;
+      if (dragging.current) pin(gap < 6);
+      else if (gap < 6 && !stick.current) pin(true);
       setShowJump((v) => { const n = !stick.current && gap >= 6; return v === n ? v : n; });
     });
   };
-  const onWheel = (e: React.WheelEvent) => { if (e.deltaY < 0) stick.current = false; };
+  const onWheel = (e: React.WheelEvent) => { if (e.deltaY < 0 && stick.current) pin(false); };
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.target !== scroller.current) return;               // the scrollbar itself, not the conversation
     dragging.current = true;
@@ -110,24 +124,50 @@ export function SessionView({ live, envFloat }: { live: Live & { loaded?: boolea
   useEffect(() => {
     const el = scroller.current;
     if (!el) return;
-    const key = (e: KeyboardEvent) => { if (["PageUp", "Home", "ArrowUp"].includes(e.key) && document.activeElement === el) stick.current = false; };
+    const key = (e: KeyboardEvent) => { if (["PageUp", "Home", "ArrowUp"].includes(e.key) && document.activeElement === el) pin(false); };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
   }, []);
   const jump = () => {
-    stick.current = true;
+    pin(true);
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" });
   };
 
+  // Everything handed to the message box stays the same object while what it stands for is the same: the box is
+  // memoized, so a reply being written (a new session object ~20 times a second) never redraws it, and typing never
+  // waits for the conversation.
+  const wid = live.wid;
   const send = useCallback((text: string, atts: any[], pastes: any[]) => {
-    stick.current = true;
-    s.send(live.wid, text, atts, pastes);
-  }, [live.wid]);
-  const runCommand = (cmd: string) => send(cmd, [], []);
+    pin(true);
+    useStore.getState().send(wid, text, atts, pastes);
+  }, [wid]);
+  const runCommand = useCallback((cmd: string) => send(cmd, [], []), [send]);
   const rewind = useCallback((n: number) => send(`/rewind ${n} both`, [], []), [send]);
   const st = live.status;
   const mode = st.mode || "ask";
   const req = live.request;
+  const onStop = useCallback(() => useStore.getState().stop(wid), [wid]);
+  const onCycleMode = useCallback(() => useStore.getState().setOpt(wid, { mode: MODE_ORDER[(MODE_ORDER.indexOf(mode) + 1) % 3] }), [wid, mode]);
+  const onTalk = useCallback((on: boolean) => useStore.getState().setTalk(wid, on), [wid]);
+  const onCall = useCallback((on: boolean) => useStore.getState().setCall(wid, on), [wid]);
+  const onCallNow = !!st.call;
+  const onTyping = useCallback(() => {
+    if (onCallNow && Date.now() - typingAt.current > 3000) {
+      typingAt.current = Date.now();
+      post("/api/session/typing", { wid }).catch(() => {});
+    }
+  }, [wid, onCallNow]);
+  // the context ring reads only the session's status: it gets the session as it was when the status last changed
+  const ringLive = useMemo(() => live, [live.status]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const footer = useMemo(() => (
+    <>
+      <div className="flex-1" />
+      <ModelEffortChip model={st.model || ""} effort={st.effort || "medium"}
+        onModel={(m) => useStore.getState().setOpt(wid, { model: m })} onEffort={(e) => useStore.getState().setOpt(wid, { effort: e })} />
+      <ModeChip value={mode} onChange={(m) => useStore.getState().setOpt(wid, { mode: m })} />
+      <ContextRing live={ringLive} onCommand={runCommand} />
+    </>
+  ), [st.model, st.effort, mode, wid, ringLive, runCommand]);
 
   return (
     <div className="relative h-full min-w-0 flex-1">
@@ -152,12 +192,12 @@ export function SessionView({ live, envFloat }: { live: Live & { loaded?: boolea
           {rows.slice(start).flatMap((r, j) => {
             const i = start + j;
             const row = (
-              <RowView key={r.key} r={r} checkpoints={st.checkpoints} onRewind={rewind} endOfTurn={"item" in r && endIds.has(r.item.id)}
+              <RowView key={r.key} r={r} checkpoints={checkpoints} onRewind={rewind} endOfTurn={"item" in r && endIds.has(r.item.id)}
                 fresh={i >= rows.length - 3} />
             );
             const t = taskLists.get(i);
-            if (liveGroup && i === rows.length - 1) return t ? [<div key={t.key} className="item-in pr-[43px]"><TaskList todos={t.todos} /></div>] : [];
-            return t ? [row, <div key={t.key} className="item-in pr-[43px]"><TaskList todos={t.todos} /></div>] : [row];
+            if (liveGroup && i === rows.length - 1) return t ? [<TaskBlock key={t.key} todos={t.todos} />] : [];
+            return t ? [row, <TaskBlock key={t.key} todos={t.todos} />] : [row];
           })}
           {(live.busy || !!live.working?.voice) && live.working && !req && (
             <Working since={live.working.since} tool={live.busy ? lastRunningTool(items) : undefined}
@@ -168,6 +208,7 @@ export function SessionView({ live, envFloat }: { live: Live & { loaded?: boolea
           )}
         </div>
       </div>
+      {!!st.call && !live.closed && <CallWindow wid={live.wid} />}
       {/* the message box and what sits on it float over the conversation; the 10px sides leave the scrollbar free */}
       <div ref={dock} className="pointer-events-none absolute inset-x-[10px] bottom-0 z-10">
         {showJump && (
@@ -197,39 +238,40 @@ export function SessionView({ live, envFloat }: { live: Live & { loaded?: boolea
           history={history}
           placeholder={live.busy ? "Queue another message…" : "Type / for commands"}
           onSend={send}
-          onStop={() => s.stop(live.wid)}
-          onCycleMode={() => s.setOpt(live.wid, { mode: MODE_ORDER[(MODE_ORDER.indexOf(mode) + 1) % 3] })}
+          onStop={onStop}
+          onCycleMode={onCycleMode}
           talk={st.talk}
-          onTalk={(on) => s.setTalk(live.wid, on)}
-          call={!!st.call}
-          onCall={(on) => s.setCall(live.wid, on)}
-          onTyping={() => {
-            if (st.call && Date.now() - typingAt.current > 3000) {
-              typingAt.current = Date.now();
-              post("/api/session/typing", { wid: live.wid }).catch(() => {});
-            }
-          }}
+          onTalk={onTalk}
+          call={onCallNow}
+          onCall={onCall}
+          onTyping={onTyping}
           autoFocus
-          footer={
-            <>
-              <div className="flex-1" />
-              <ModelEffortChip model={st.model || ""} effort={st.effort || "medium"}
-                onModel={(m) => s.setOpt(live.wid, { model: m })} onEffort={(e) => s.setOpt(live.wid, { effort: e })} />
-              <ModeChip value={mode} onChange={(m) => s.setOpt(live.wid, { mode: m })} />
-              <ContextRing live={live} onCommand={runCommand} />
-            </>
-          }
+          footer={footer}
         />
         </div>
       </div>
       {envFloat && (
-        <EnvPanel live={live} onCommand={runCommand} floating maxHeight={`calc(100% - ${dockH + 16}px)`}
-          onClose={() => useStore.setState({ envFloat: false })} />
+        <EnvPanel live={live} onCommand={runCommand} floating maxHeight={`calc(100% - ${dockH + 16}px)`} onClose={closeEnvFloat} />
       )}
       {req && req.kind === "choose" && <ChooseDialog req={req} onAnswer={(v) => s.answer(live.wid, req.id, v)} />}
     </div>
   );
 }
+
+const closeEnvFloat = () => useStore.setState({ envFloat: false });
+
+/** `value` as it was the last time `key` changed: an array rebuilt with the same contents stays the same object. */
+function useSame<T>(value: T, key: string): T {
+  const ref = useRef({ key, value });
+  if (ref.current.key !== key) ref.current = { key, value };
+  return ref.current.value;
+}
+
+/** A turn's task list; drawn again only when a task changes (the list is rebuilt on every piece of a reply). */
+const TaskBlock = memo(function TaskBlock({ todos }: { todos: Todo[] }) {
+  return <div className="item-in pr-[43px]"><TaskList todos={todos} /></div>;
+}, (a, b) => a.todos.length === b.todos.length
+  && a.todos.every((t, i) => t.content === b.todos[i].content && t.status === b.todos[i].status && t.activeForm === b.todos[i].activeForm));
 
 /** The tool that is running right now (the newest one still marked running), if any. */
 function lastRunningTool(items: Item[]): string | undefined {

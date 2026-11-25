@@ -2,7 +2,7 @@
 // folder headers in small grey type, long titles fading out instead of "…", the account row at the bottom.
 import { useShallow } from "zustand/react/shallow";
 import { useMemo, useState } from "react";
-import { useStore, currentLive, folderName } from "@/lib/store";
+import { useStore, useLiveOnScreen, folderName } from "@/lib/store";
 import type { SessionMeta } from "@/lib/types";
 import { bridge, openExternal, openPath } from "@/lib/desktop";
 import { cn, prettyModel } from "@/lib/util";
@@ -17,7 +17,7 @@ export const SIDEBAR_W = 220;
 
 export function Sidebar({ width }: { width: number }) {
   const s = useStore(useShallow((st) => ({ home: st.home, navigate: st.navigate, opening: st.opening, pickFolder: st.pickFolder, sessions: st.sessions, setHome: st.setHome, setSetting: st.setSetting, settings: st.settings, state: st.state, view: st.view })));
-  const live = useStore((st) => currentLive(st));
+  const live = useLiveOnScreen();                  // not the whole session: the sidebar must not redraw on every word of a reply
   const collapsed: string[] = Array.isArray(s.settings.desktop_collapsed) ? s.settings.desktop_collapsed : [];
   const [more, setMore] = useState<Record<string, boolean>>({});
 
@@ -55,7 +55,7 @@ export function Sidebar({ width }: { width: number }) {
   const customize = (tab: "plugins" | "skills" | "connectors" | "scheduled") => s.navigate({ kind: "customize", tab });
 
   return (
-    <aside className="flex h-full shrink-0 flex-col border-r border-border-300 bg-bg-200 text-[11.5px]" style={{ width }}>
+    <aside className={cn("flex h-full shrink-0 flex-col overflow-hidden bg-bg-200 text-[11.5px]", width > 0 && "border-r border-border-300")} style={{ width }}>
       <nav className="flex flex-col gap-px px-[7px] pt-[6px]">
         <NavRow icon={<PlusSm />} active={s.view.kind === "home"} onClick={() => s.navigate({ kind: "home" })}>New</NavRow>
         <NavRow icon={<SearchSm />} onClick={() => useStore.setState({ dialog: { kind: "search" } })}>Search</NavRow>
@@ -168,7 +168,11 @@ function NavRow({ icon, children, onClick, active, extra }: {
 
 function SessionRow({ meta, active, opening }: { meta: SessionMeta; active: boolean; opening: boolean }) {
   const s = useStore.getState();
-  const live = useStore((st) => Object.values(st.lives).find((l) => l.sid === meta.id));
+  // what the row shows of its open session (a few fields, so the row of a session that is writing does not redraw per word)
+  const live = useStore(useShallow((st) => {
+    const l = Object.values(st.lives).find((x) => x.sid === meta.id);
+    return l ? { wid: l.wid, busy: l.busy, request: !!l.request, title: l.title, closed: l.closed } : null;
+  }));
   const sidebarW = useStore((st) => Number(st.settings.desktop_sidebar_width) || 220);
   const busy = live ? live.busy : meta.busy;
   const waiting = live ? !!live.request : meta.waiting;

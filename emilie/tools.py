@@ -347,6 +347,7 @@ class _BgTask:
         import threading
         import time
         self.id, self.command, self.started = tid, command, time.time()
+        self.ended: float | None = None
         self.lines = collections.deque(maxlen=self.MAX_LINES)
         self.dropped = 0                       # lines that fell off the front of the buffer
         self.read_upto = 0                     # absolute line number the model has already seen
@@ -368,6 +369,9 @@ class _BgTask:
                     self.dropped += 1
                 self.lines.append(line.rstrip("\r\n"))
                 self.total += 1
+        import time
+        self.proc.wait()
+        self.ended = time.time()
 
     @property
     def running(self) -> bool:
@@ -391,6 +395,33 @@ def _bg_status(t: _BgTask) -> str:
     import time
     age = int(time.time() - t.started)
     return (f"running {age}s" if t.running else f"exited with code {t.proc.returncode}") + f" · {t.command[:80]}"
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07")
+_LOCAL_URL = re.compile(r"https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\])(?::\d+)?[^\s\"'<>)]*")
+
+
+def bg_snapshot(open_id: int = 0, tail: int = 200) -> list[dict]:
+    """The background tasks for the app's Tasks panel (it does not touch what the model has already read). The output is
+    included only for the task that is opened there; the local address a dev server printed is picked out for all."""
+    import time
+    out = []
+    for t in list(BG.values()):
+        with t.lock:
+            lines = list(t.lines)
+        url = ""
+        for line in lines[-300:]:
+            m = _LOCAL_URL.search(_ANSI.sub("", line))
+            if m:
+                url = m.group(0).replace("0.0.0.0", "localhost").rstrip(".,;")
+        running = t.running
+        row = {"id": t.id, "command": t.command, "running": running, "code": None if running else t.proc.returncode,
+               "seconds": int((time.time() if running else (t.ended or time.time())) - t.started), "url": url,
+               "last": _ANSI.sub("", lines[-1])[:200] if lines else ""}
+        if t.id == open_id:
+            row["output"] = _ANSI.sub("", "\n".join(lines[-tail:]))
+        out.append(row)
+    return out
 
 
 def bash_bg(command: str) -> str:

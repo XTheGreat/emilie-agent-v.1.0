@@ -6,6 +6,8 @@ import { SessionTitle } from "./TitleBar";
 import { get as apiGet, post } from "@/lib/api";
 import { bridge, isElectron, openPath } from "@/lib/desktop";
 import { RealTerminal } from "./RealTerminal";
+import { TasksPane } from "./TasksPane";
+import { CheckpointsPane } from "./CheckpointsPane";
 import { highlight } from "@/lib/markdown";
 import { basename, cn, tabsThatDoNotFit } from "@/lib/util";
 import * as I from "./icons";
@@ -16,13 +18,16 @@ import { Spinner, Tip } from "./ui";
 
 const ICON: Record<string, React.ReactNode> = {
   files: <I.FolderSm size={11} />, terminal: <I.Prompt size={11} />, browser: <I.GlobeSm size={11} />, diff: <I.FileDiff size={11} />,
+  tasks: <I.ListTodo size={11} />, checkpoints: <I.Rewind size={11} />,
 };
 
-type Panel = { id: string; kind: "chat" | "viewer" | "terminal" | "browser" | "diff"; tabs: PaneTab[] };
-const PANEL_TITLE: Record<string, string> = { terminal: "Terminal", browser: "Browser", diff: "Changes" };
+type Panel = { id: string; kind: "chat" | "viewer" | "terminal" | "browser" | "diff" | "tasks" | "checkpoints"; tabs: PaneTab[] };
+const PANEL_TITLE: Record<string, string> = { terminal: "Terminal", browser: "Browser", diff: "Changes", tasks: "Tasks", checkpoints: "Checkpoints" };
 const MIN_PX = 160;        // no panel is dragged narrower (or shorter) than this ...
 const CHAT_MIN_PX = 300;   // ... and the conversation not narrower than this
-const MIN_W_PX = 240;      // side by side no panel gets narrower than this, so its header icons (close, expand ...) never slide out of sight
+const MIN_W_PX = 150;      // side by side a panel rests no narrower than this ...
+const FLOOR_W_PX = 96;     // ... but can be squeezed down to this while held
+const CLOSE_W_PX = 125;    // squeezed below this it looks shut, and letting go there closes it
 const EASE = "cubic-bezier(.2,.8,.2,1)";
 const EASE_MS = ".16s";
 const MIN_FR = 0.08;       // no panel gets smaller than this share of the side area
@@ -165,6 +170,7 @@ export function Pane({ cwd, chat, chatTitle }: { cwd: string; chat: React.ReactN
   const ids = panels.map((p) => p.id);
   const idKey = ids.join("|");
   const solo = ids.length === 1;                         // only the conversation: no title bar, no frame
+  const [shutting, setShutting] = useState<string | null>(null);     // a panel squeezed so small that letting go closes it
   const [expanded, setExpanded] = useState<string | null>(null);   // "Expand": this panel alone fills the area
   const [snap, setSnap] = useState(false);                           // expanding / restoring is instant: no easing (and no re-fit of every panel per frame)
   const max = expanded !== null && !solo;
@@ -206,24 +212,48 @@ export function Pane({ cwd, chat, chatTitle }: { cwd: string; chat: React.ReactN
   const order = leafIds(lay);
   const inset = solo || max ? 0 : 0.5;
 
+  const closeById = (id: string) => {
+    const p = panels.find((x) => x.id === id);
+    if (!p) return;
+    const st = useStore.getState();
+    const keep = st.paneTabs.filter((t) => !p.tabs.some((x) => x.key === t.key));
+    const act = keep.find((t) => t.key === st.paneActive) ? st.paneActive : keep[keep.length - 1]?.key || null;
+    const k = keep.find((t) => t.key === act);
+    useStore.setState({ paneTabs: keep, paneActive: act, pane: k ? (k.kind === "file" ? "files" : (k.kind as any)) : null, paneMax: keep.length ? st.paneMax : false });
+  };
+
   const startSplit = (sp: Sep) => (e: React.MouseEvent) => {
     e.preventDefault();
     const b = box.current!.getBoundingClientRect();
     const pair = sp.sizes[sp.i] + sp.sizes[sp.i + 1];
     const before = sp.sizes.slice(0, sp.i).reduce((a, c) => a + c, 0);
     const parentPx = ((sp.dir === "row" ? b.width * sp.parent.w : b.height * sp.parent.h) / 100) || 1;
-    const other = sp.dir === "row" ? MIN_W_PX : MIN_PX;
+    const other = sp.dir === "row" ? FLOOR_W_PX : MIN_PX;
     const lo = Math.min((sp.chatA ? CHAT_MIN_PX : other) / parentPx, pair / 2);
     const hi = pair - Math.min((sp.chatB ? CHAT_MIN_PX : other) / parentPx, pair / 2);
+    // the panel on each side, when it is exactly one panel that is not the conversation: it may be shut by squeezing it
+    const node = (path: number[]) => path.reduce<LNode>((n, i) => (n.t === "split" ? n.kids[i] : n), eff!);
+    const parent = node(sp.path);
+    const one = (k: LNode | undefined) => (k && k.t === "leaf" && k.id !== "chat" ? k.id : null);
+    const idA = parent.t === "split" && sp.dir === "row" ? one(parent.kids[sp.i]) : null;
+    const idB = parent.t === "split" && sp.dir === "row" ? one(parent.kids[sp.i + 1]) : null;
+    let shut: string | null = null;
     drag((ev) => {
       const p = sp.dir === "row" ? ((ev.clientX - b.left) / b.width) * 100 : ((ev.clientY - b.top) / b.height) * 100;
       const t = (p - (sp.dir === "row" ? sp.parent.x : sp.parent.y)) / (sp.dir === "row" ? sp.parent.w : sp.parent.h);
       const first = Math.min(hi, Math.max(lo, t - before));
+      const pxA = first * parentPx, pxB = (pair - first) * parentPx;
+      shut = idA && pxA < CLOSE_W_PX ? idA : idB && pxB < CLOSE_W_PX ? idB : null;
+      setShutting(shut);
       const sizes = [...sp.sizes];
       sizes[sp.i] = first;
       sizes[sp.i + 1] = pair - first;
       setTree(setSizesAt(eff!, sp.path, sizes));
-    }, sp.dir === "row" ? "col-resize" : "row-resize", () => setResizing(false));
+    }, sp.dir === "row" ? "col-resize" : "row-resize", () => {
+      setResizing(false);
+      setShutting(null);
+      if (shut) closeById(shut);                                      // let go while squeezed shut: now it really closes
+    });
     setResizing(true);
   };
 
@@ -273,7 +303,7 @@ export function Pane({ cwd, chat, chatTitle }: { cwd: string; chat: React.ReactN
           <PanelView key={p.id} p={p} cwd={cwd} chat={chat} chatTitle={chatTitle} solo={solo}
             expanded={expanded === p.id} onExpand={() => { setSnap(true); setExpanded(expanded === p.id ? null : p.id); }}
             lift={grab?.id === p.id ? grab : null} ease={!resizing && !snap}
-            onGrab={(e) => startGrab(p.id, e)} style={r ? geo(r) : { display: "none" }} />
+            onGrab={(e) => startGrab(p.id, e)} style={r ? (shutting === p.id ? { ...geo(r), opacity: 0.35 } : geo(r)) : { display: "none" }} />
         );
       })}
       {grab && rects.get(grab.id) && (
@@ -392,6 +422,8 @@ function PanelView({ p, cwd, chat, chatTitle, solo, expanded, onExpand, style, l
       <div className="min-h-0 flex-1 overflow-hidden">
         {tab.kind === "file" && <FileTab key={tab.key} path={tab.path!} cwd={cwd} />}
         {tab.kind === "files" && <FilesPane cwd={cwd} />}
+        {tab.kind === "tasks" && <TasksPane />}
+        {tab.kind === "checkpoints" && <CheckpointsPane />}
         {tab.kind === "terminal" && (bridge?.ptyCreate ? <RealTerminal cwd={cwd} fallback={<TerminalPane cwd={cwd} />} /> : <TerminalPane cwd={cwd} />)}
       </div>
     </section>
@@ -825,8 +857,8 @@ const FileCard = memo(function FileCard({ f, isOpen, tight, tiny, cwd, lines, vi
           <span className="shrink-0 text-text-400">{fileIcon(f.path)}</span>
           {/* the folder gives way first (cut with an ellipsis), then the name a little; the counts are never dropped */}
           <span className="flex min-w-0 flex-1 items-baseline gap-1.5">
-            <span className={cn("min-w-0 shrink-[0.25] truncate font-normal", tone)}>{name}</span>
-            {dir && <span className="min-w-0 truncate text-[9.5px] text-text-500">{dir}</span>}
+            <span className={cn("min-w-0 shrink truncate font-normal", tone)}>{name}</span>
+            {dir && <span className="min-w-0 shrink-[5] truncate text-[9.5px] text-text-500">{dir}</span>}
             {f.nodiff === "Too large to show" && <span className="shrink-0 text-[9.5px] text-text-500">{f.nodiff}</span>}
           </span>
           {f.large && !tight && <span className="shrink-0 rounded-full border border-border-300 px-1.5 text-[9.5px] text-text-400">Large diff</span>}

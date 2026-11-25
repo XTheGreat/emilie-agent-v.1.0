@@ -1,13 +1,13 @@
 // The "Environment" panel on the right of a session, like the Claude Code desktop app (240px):
 // where she works (computer, folder, git branch), a toggle, Context (what fills it, by kind, and when it is summarized),
 // Connectors, Outputs (files she wrote) and Changes.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "@/lib/store";
 import type { CtxParts, Item, Live, Status } from "@/lib/types";
 import { get as apiGet, post } from "@/lib/api";
 import { openExternal, openPath } from "@/lib/desktop";
 import { cn, dirname } from "@/lib/util";
-import { BranchSm, ChevD, ChevR, CodeXml, FileDiff, FileText, FolderSm, GearSm, GlobeSm, LaptopIcon, Volume } from "./icons";
+import { BranchSm, Camera, ChevD, Video, ChevR, CodeXml, FileDiff, FileText, FolderSm, GearSm, GlobeSm, LaptopIcon, Volume } from "./icons";
 import { Menu, MenuContent, MenuItem, MenuLabel, MenuSep, MenuTrigger, Switch, Tip } from "./ui";
 
 const WRITE_TOOLS = new Set(["write_file", "edit_file", "docx_create", "docx_edit", "xlsx_write", "notebook_edit"]);
@@ -21,10 +21,33 @@ function fileIcon(name: string) {
   return <CodeXml size={12} />;
 }
 
-export function EnvPanel({ live, onCommand, floating, maxHeight, onClose }: {
+type EnvProps = {
   live: Live; onCommand: (cmd: string) => void;
   floating?: boolean; maxHeight?: string; onClose?: () => void;    // floating: over the conversation while a file is open
-}) {
+};
+
+/** The panel shows the session's folder, status and the files she wrote. A piece of a reply changes none of these but
+ *  makes the session a new object, so the panel compares what it shows instead and skips those redraws. */
+function sameEnv(a: EnvProps, b: EnvProps): boolean {
+  if (a.onCommand !== b.onCommand || a.floating !== b.floating || a.maxHeight !== b.maxHeight || a.onClose !== b.onClose) return false;
+  const x = a.live, y = b.live;
+  return x === y || (x.wid === y.wid && x.cwd === y.cwd && x.busy === y.busy && x.closed === y.closed && x.status === y.status
+    && outputsKey(x.items) === outputsKey(y.items));
+}
+
+/** The files written so far (what Outputs lists), as one string; remembered per list of items. */
+const outKeys = new WeakMap<Item[], string>();
+function outputsKey(items: Item[]): string {
+  let k = outKeys.get(items);
+  if (k === undefined) {
+    k = "";
+    for (const it of items) if (it.kind === "tool" && WRITE_TOOLS.has(it.name) && it.status === "ok" && it.input?.path) k += String(it.input.path) + "\n";
+    outKeys.set(items, k);
+  }
+  return k;
+}
+
+export const EnvPanel = memo(function EnvPanel({ live, onCommand, floating, maxHeight, onClose }: EnvProps) {
   const box = useRef<HTMLElement>(null);
   const close = useRef(onClose);
   close.current = onClose;
@@ -121,6 +144,9 @@ export function EnvPanel({ live, onCommand, floating, maxHeight, onClose }: {
         </Menu>
       )}
       <Row icon={<Volume size={12} />} label="Voice" right={<Switch checked={voice} onChange={(v) => setSetting("voice", v)} />} />
+      <Row icon={<Video size={12} />} label="Video" title="A video call: Emilie sees you through the camera while it is on"
+        right={<Switch checked={!!st.call} onChange={(v) => useStore.getState().setCall(live.wid, v)} />} />
+      <CameraRow />
       <Divider />
       <Fold id="context" title="Context" summary={<CtxSummary st={st} />}>
         <ContextSection st={st} />
@@ -189,11 +215,47 @@ export function EnvPanel({ live, onCommand, floating, maxHeight, onClose }: {
       </Fold>
     </aside>
   );
-}
+}, sameEnv);
 
 /** Copy to the clipboard (the Electron page has navigator.clipboard); a failure is ignored. */
 function copyText(t: string) {
   try { navigator.clipboard.writeText(t); useStore.getState().toast("Copied", "ok"); } catch { /* no clipboard */ }
+}
+
+/** Camera: a row that opens a menu (take a photo into the message, pick the device, open the camera settings). */
+function CameraRow() {
+  const [info, setInfo] = useState<{ available: boolean; devices: string[]; configured?: string | null } | null>(null);
+  const load = () => apiGet("/api/camera").then(setInfo).catch(() => setInfo({ available: false, devices: [] }));
+  const pick = async (d: string | null) => {
+    try { setInfo(await post("/api/camera/device", { device: d })); } catch (e: any) { useStore.getState().toast(e.message, "error"); }
+  };
+  const chosen = info?.configured || "";
+  return (
+    <Menu onOpenChange={(o) => o && load()}>
+      <MenuTrigger asChild>
+        <div role="button" title="Camera" className="-mx-1 flex h-[24px] cursor-default items-center gap-[9px] rounded-[5px] px-1 text-text-100 hover:bg-hover">
+          <span className="flex w-[12px] shrink-0 justify-center text-text-400"><Camera size={12} /></span>
+          <span className="min-w-0 flex-1 truncate">Camera</span>
+          <ChevD size={10} className="shrink-0 text-text-400" />
+        </div>
+      </MenuTrigger>
+      <MenuContent align="start" className="min-w-[210px]">
+        <MenuItem disabled={info !== null && !info.available}
+          onSelect={() => window.dispatchEvent(new CustomEvent("emilie:take-photo"))}>Take a photo</MenuItem>
+        {info !== null && !info.available && <div className="px-2 py-1 text-[11px] leading-[15px] text-text-400">No camera found. Install ffmpeg (winget install Gyan.FFmpeg) and plug one in.</div>}
+        {!!info?.devices.length && (
+          <>
+            <MenuSep />
+            <MenuLabel>Camera device</MenuLabel>
+            <MenuItem checked={!chosen} onSelect={() => pick(null)}>Automatic</MenuItem>
+            {info.devices.map((d) => <MenuItem key={d} checked={chosen === d} onSelect={() => pick(d)}>{d}</MenuItem>)}
+          </>
+        )}
+        <MenuSep />
+        <MenuItem onSelect={() => useStore.setState({ settingsOpen: "capabilities" })}>Camera settings…</MenuItem>
+      </MenuContent>
+    </Menu>
+  );
 }
 
 function Row({ icon, label, right, onClick, title }: { icon?: React.ReactNode; label: React.ReactNode; right?: React.ReactNode; onClick?: () => void; title?: string }) {

@@ -226,6 +226,29 @@ class Ckpt(dict):
         self.label, self.mark, self.at = " ".join((label or "").split())[:70], mark, time.time()
 
 
+_MEDIA_REFUSED = re.compile(r"multimodal|multi-modal|image_url|video_url|does not support (image|vision|video)|"
+                            r"(image|vision|video)s? (is|are) not supported|only text|enable-multimodal", re.I)
+
+
+def _without_media(messages: list) -> list:
+    """The same messages with every image / video part replaced by a short note (the stored history is not touched)."""
+    out = []
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, list) and any(isinstance(p, dict) and p.get("type") in ("image", "image_url", "video_url") for p in c):
+            parts, noted = [], False
+            for p in c:
+                if isinstance(p, dict) and p.get("type") in ("image", "image_url", "video_url"):
+                    if not noted:
+                        parts.append({"type": "text", "text": "[a picture or video was attached here; this model cannot take it]"})
+                        noted = True
+                else:
+                    parts.append(p)
+            m = {**m, "content": parts}
+        out.append(m)
+    return out
+
+
 class Agent:
     def __init__(self, console: Console, policy: Policy, effort: Effort):
         self.console = console
@@ -707,11 +730,16 @@ class Agent:
         return min(at, int(ctx * 0.7)) if ctx else at
 
     def _outgoing(self) -> list:
-        """The history as it is sent to the model: old tool results trimmed (trim.py); the stored history stays whole."""
+        """The history as it is sent to the model: old tool results trimmed (trim.py); the stored history stays whole.
+        For a model that refused pictures (_no_media) every image / video is left out of what is sent."""
         if load_settings().get("trim_tool_results", True) is False:
-            return self.messages
-        st = self.__dict__.setdefault("_trim_state", {})
-        return trim.slim(self.messages, st)
+            msgs = self.messages
+        else:
+            st = self.__dict__.setdefault("_trim_state", {})
+            msgs = trim.slim(self.messages, st)
+        if (PROVIDER_ID, self.active_model) in self.__dict__.get("_no_media", ()):
+            msgs = _without_media(msgs)
+        return msgs
 
     def ctx_breakdown(self) -> dict:
         """What fills the context, by kind (estimates), for the desktop app's Context panel. The parts add up to
@@ -1280,7 +1308,18 @@ class Agent:
             if VISION_MODEL and VISION_MODEL != self.model:
                 self.console.print(tr_('[{MUTED}]image attached → using vision model: {VISION_MODEL}[/]', MUTED=MUTED, VISION_MODEL=VISION_MODEL))
             elif not VISION_MODEL:
-                self.console.print(tr_('[{MUTED}]Camera is on[/]', MUTED=MUTED))
+                from . import doctor, models as _models
+                sees = _models.sees_images(self.model, doctor.load_profile(PROVIDER_ID or PROVIDER, self.model))
+                if sees is False:
+                    # a model that cannot see would fail or answer blind: say so, and do not send the picture
+                    n = len(images)
+                    self.console.print(tr_("[{WARN}]{model} cannot see images, so the {n} picture(s) were not sent. "
+                                           "Switch to a model with vision (the eye icon in the model list) and send it again.[/]",
+                                           WARN=WARN, model=self.model, n=n))
+                    user_text = ((user_text or "") + f"\n\n[The user attached {n} image(s), but this model cannot see images, "
+                                 "so they were not sent. Tell them briefly that you cannot see the picture and that a "
+                                 "model with vision is needed. Do not guess what it shows.]").strip()
+                    images = []
         if self._resume_note:                  # the previous turn was cut short (provider error / Ctrl+C): tell the model
             user_text = (RESUME_NOTES[self._resume_note] + "\n\n" + user_text).strip()
             self._resume_note = ""
@@ -1579,6 +1618,19 @@ class Agent:
         ratelimit.note_ok(k)
         return r
 
+    def _drop_media(self, e: BaseException, model: str) -> bool:
+        """True when the server refused pictures / video ("multimodal processing is not enabled", whatever the exception
+        class or status code) and the conversation holds some: from now on they are left out of what is sent for this
+        model (the stored history keeps them), and the caller tries the request again."""
+        done = self.__dict__.setdefault("_no_media", set())
+        if (PROVIDER_ID, model) in done or not _MEDIA_REFUSED.search(str(e)) or not self.history_has_images():
+            return False
+        done.add((PROVIDER_ID, model))
+        self.console.print(tr_("[{WARN}]{model} does not accept images or video here, so the pictures in this "
+                               "conversation are left out when sending. Switch to a model with vision to use them.[/]",
+                               WARN=WARN, model=model))
+        return True
+
     def _resilient(self, make_iter):
         """_pump with patience: each request first waits for its model's shared cool-down and pacing (ratelimit.py);
         when it fails BEFORE any answer arrived (rate limit, busy server, timeout) it is tried again after growing
@@ -1601,6 +1653,8 @@ class Agent:
             except BaseException as e:
                 if got:
                     raise
+                if self._drop_media(e, model):
+                    continue
                 if self._should_retry(e, attempt, retries, model):
                     attempt, announced = attempt + 1, True
                     continue
@@ -1699,6 +1753,8 @@ class Agent:
                 stream = self.client.chat.completions.create(**kw)
             except Exception as e:
                 code = getattr(e, "status_code", 0)
+                if self._drop_media(e, model):
+                    continue
                 if code not in (400, 422) and not (self._usage_opt and "stream_options" in str(e)):
                     raise
                 if extra and reasoning.rejected(e):           # it says so: no thinking switch for this model

@@ -11,6 +11,7 @@ Live events produce the same items, so a session looks the same whether it is ru
 """
 from __future__ import annotations
 
+import os
 import difflib
 import json
 import re
@@ -83,6 +84,33 @@ def _diff(path: str, old: str, new: str) -> dict | None:
     if len(text) > 60_000:
         text = text[:60_000] + "\n… (diff cut)"
     return {"text": text, "added": added, "removed": removed, "new_file": not old, "path": path}
+
+
+def checkpoint_files(checkpoints: list, n: int, cwd: str) -> list[dict]:
+    """What the n-th most recent checkpoint's turn changed (n=1 = the latest). "Before" is the copy that checkpoint
+    saved; "after" is the copy the next turn that touched the file saved, else the file on disk now."""
+    if not 1 <= n <= len(checkpoints):
+        return []
+    i = len(checkpoints) - n
+    out = []
+    for path, before in list(checkpoints[i].items())[:60]:
+        later = next((ck for ck in checkpoints[i + 1:] if path in ck), None)
+        if later is not None:
+            after = later[path]
+        else:
+            try:
+                p = Path(path)
+                after = p.read_bytes() if p.is_file() else None
+            except OSError:
+                after = None
+        rel = os.path.relpath(path, cwd) if path.lower().startswith(cwd.lower()) else path
+        row = {"path": path, "rel": rel, "status": "A" if before is None else "D" if after is None else "M", "diff": None,
+               "binary": any(b is not None and b"\0" in b[:4000] for b in (before, after))}
+        if not row["binary"]:
+            old, new = ((b or b"").decode("utf-8", "replace").replace("\r\n", "\n") for b in (before, after))
+            row["diff"] = _diff(path, old, new) if old != new else None
+        out.append(row)
+    return out
 
 
 def diff_for(name: str, args: dict) -> dict | None:

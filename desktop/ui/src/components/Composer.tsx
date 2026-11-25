@@ -1,14 +1,17 @@
 // The message box: text, attachments, / commands, @ files, mic, send / stop. Same behaviour as the terminal input.
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useStore } from "@/lib/store";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { currentLive, useStore } from "@/lib/store";
 import type { Command } from "@/lib/types";
 import { get as apiGet, post } from "@/lib/api";
 import { bridge, pathOfFile } from "@/lib/desktop";
 import { type Attachment, basename, cn, readFile, uid } from "@/lib/util";
-import { AtSign, Camera, FileIcon, MicSm, Paperclip, Phone, PhoneOff, PlusSm, ReturnKey, Slash, X } from "./icons";
+import { Alert, AtSign, Camera, FileIcon, MicSm, Paperclip, Phone, PhoneOff, PlusSm, ReturnKey, Slash, X } from "./icons";
 import { Menu, MenuContent, MenuItem, MenuSep, MenuTrigger, Tip } from "./ui";
 
 const LONG_LINES = 4, LONG_CHARS = 500;
+// The box grows with its text by CSS (field-sizing) where the browser has it: no measuring of the page on every key.
+const FIELD_SIZING = typeof CSS !== "undefined" && !!CSS.supports?.("field-sizing", "content");
+const prettyName = (m: string) => m.replace(/^.*\//, "") || "This model";
 
 export interface ComposerProps {
   draftKey: string;
@@ -32,7 +35,9 @@ export interface ComposerProps {
 
 type MenuState = { kind: "slash" | "mention"; items: { value: string; label: string; desc?: string; kind?: string }[]; idx: number; start: number; end: number } | null;
 
-export function Composer(p: ComposerProps) {
+/** Memoized: the conversation above redraws for every piece of a reply, the message box only when its own props change,
+ *  so typing stays quick while she writes. */
+export const Composer = memo(function Composer(p: ComposerProps) {
   const toast = useStore((s) => s.toast);
   const [text, setText] = useState(() => useStore.getState().drafts[p.draftKey] || "");
   const [atts, setAtts] = useState<Attachment[]>([]);
@@ -70,7 +75,7 @@ export function Composer(p: ComposerProps) {
   }, []);
   useLayoutEffect(() => {
     const el = ta.current;
-    if (!el) return;
+    if (!el || FIELD_SIZING) return;
     el.style.height = "0px";
     el.style.height = Math.min(el.scrollHeight, Math.round(window.innerHeight * 0.4)) + "px";
   }, [text]);
@@ -170,6 +175,13 @@ export function Composer(p: ComposerProps) {
     if (bridge) return attachPaths(await bridge.pickFiles({ title: "Add files or photos" }));
     fileInput.current?.click();
   };
+  // a model the list says cannot see: warn before sending (the agent also leaves the picture out and says so)
+  const model = useStore((s) => currentLive(s)?.status.model || s.home.model || "");
+  const models = useStore((s) => s.models);
+  const hasImage = atts.some((a) => a.kind === "image");
+  useEffect(() => { if (hasImage && !models.loaded && !models.loading) useStore.getState().loadModels(); }, [hasImage]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const takePhotoRef = useRef<() => void>(() => {});
+  const blind = hasImage && !!model && models.rows.find((r) => r.id === model)?.vision === false;
   const takePhoto = async () => {
     toast("Taking a photo…");
     try {
@@ -179,6 +191,13 @@ export function Composer(p: ComposerProps) {
       toast(e.message, "error");
     }
   };
+
+  takePhotoRef.current = takePhoto;
+  useEffect(() => {                                   // the Environment panel's Camera menu
+    const go = () => takePhotoRef.current();
+    window.addEventListener("emilie:take-photo", go);
+    return () => window.removeEventListener("emilie:take-photo", go);
+  }, []);
 
   const onPaste = (e: React.ClipboardEvent) => {
     const files = Array.from(e.clipboardData.files || []);
@@ -263,6 +282,12 @@ export function Composer(p: ComposerProps) {
           }
         }}
       >
+        {blind && (
+          <div className="mx-2 mt-2 flex items-start gap-2 rounded-md border border-warn/40 bg-warn/10 px-2.5 py-1.5 text-[11.5px] leading-[15px] text-text-200" role="alert">
+            <Alert size={13} className="mt-px shrink-0 text-warn" />
+            <span>{prettyName(model)} cannot see images. The picture will not be sent. Pick a model with the eye icon in the model list.</span>
+          </div>
+        )}
         {hasAtt && (
           <div className="flex flex-wrap gap-1.5 px-2 pt-2">
             {atts.map((a) => (
@@ -334,7 +359,7 @@ export function Composer(p: ComposerProps) {
             onClick={(e) => updateMenu(text, (e.target as HTMLTextAreaElement).selectionStart)}
             onKeyDown={onKeyDown}
             onPaste={onPaste}
-            className="block max-h-[40vh] min-h-[22px] min-w-0 flex-1 resize-none bg-transparent px-1 py-[3px] text-[12px] leading-[16px] text-text-100 outline-none placeholder:text-text-500 selectable"
+            className="block max-h-[40vh] min-h-[22px] min-w-0 flex-1 resize-none bg-transparent px-1 py-[3px] text-[12px] leading-[16px] text-text-100 outline-none [field-sizing:content] placeholder:text-text-500 selectable"
           />
           {p.call && (
             <span className="mb-[3px] flex h-[16px] items-center gap-1 rounded-[4px] bg-danger-soft px-1.5 text-[10.5px] text-danger">
@@ -363,7 +388,7 @@ export function Composer(p: ComposerProps) {
       {p.footer && <div className="mt-[5px] flex h-[22px] min-w-0 items-center gap-[2px] overflow-hidden px-[7px]">{p.footer}</div>}
     </div>
   );
-}
+});
 
 function CommandMenu({ menu, onPick, onHover }: { menu: NonNullable<MenuState>; onPick: (i: number) => void; onHover: (i: number) => void }) {
   const box = useRef<HTMLDivElement>(null);
