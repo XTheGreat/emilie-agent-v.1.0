@@ -1,0 +1,87 @@
+.ex-mark {
+  display: block;
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.ex-mark .ex-surface { fill: var(--bg-100, Canvas); }
+.ex-folder { stroke-width: 1.35; opacity: .49; }
+.ex-search { --ex-scan-time: 2.9s; }
+.ex-scan-x { animation: ex-scan-x var(--ex-scan-time) ease-in-out infinite; }
+.ex-scan-y { animation: ex-scan-y var(--ex-scan-time) ease-in-out infinite; }
+.ex-lens {
+  transform-origin: 10px 10.5px;
+  animation: ex-focus var(--ex-scan-time) ease-in-out infinite;
+}
+.ex-hit {
+  opacity: 0;
+  transform-origin: 10.7px 10.5px;
+  animation: ex-hit var(--ex-scan-time) ease-out infinite;
+}
+
+/* Two shallow lobes meet in the middle. At the far end the lens
+   holds still, comes into focus, and reveals the glint inside it. */
+@keyframes ex-scan-x {
+  0%, 100% { transform: translateX(-2.45px); }
+  41%, 62% { transform: translateX(3.65px); }
+}
+@keyframes ex-scan-y {
+  0%, 20%, 41%, 62%, 81%, 100% { transform: translateY(0); }
+  10%, 71% { transform: translateY(-1.9px); }
+  31%, 90% { transform: translateY(1.9px); }
+}
+@keyframes ex-focus {
+  0%, 100% { transform: rotate(-7deg); }
+  36% { transform: rotate(3deg); }
+  44% { transform: rotate(-3deg) scale(1.13); }
+  51%, 60% { transform: rotate(-1deg) scale(1.07); }
+  75% { transform: rotate(-6deg); }
+}
+@keyframes ex-hit {
+  0%, 38%, 67%, 100% { opacity: 0; transform: scale(.45); }
+  44% { opacity: 1; transform: scale(1.22); }
+  51%, 59% { opacity: 1; transform: scale(1); }
+}
+
+.ex-web { --ex-period: 2.6s; }
+.ex-front { --ex-near: 1; --ex-far: 0; }
+.ex-back { --ex-near: 0; --ex-far: 1; }
+.ex-depth {
+  opacity: var(--ex-near);
+  animation: ex-depth var(--ex-period) steps(1, end) infinite;
+}
+.ex-orbit, .ex-stabilizer {
+  transform-origin: 0 0;
+  animation: ex-revolve var(--ex-period) linear infinite;
+}
+.ex-stabilizer { animation-direction: reverse; }
+.ex-moon { fill: #86919d; }
+.ex-moon-disc { fill: #d7dce2; stroke: #677382; }
+.ex-moon-shade { fill: #9aa4b1; }
+@keyframes ex-revolve { to { transform: rotate(360deg); } }
+/* The two drawings trade places outside the globe's rim. During the far
+   half of the same orbit the opaque globe naturally hides the Moon. */
+@keyframes ex-depth {
+  0%, 100% { opacity: var(--ex-near); }
+  50% { opacity: var(--ex-far); }
+}
+
+.ex-meridian { opacity: .7; animation: ex-rotate-globe 2.9s linear infinite; }
+.ex-meridian-next { animation-delay: -1.45s; }
+@keyframes ex-rotate-globe {
+  0% { d: path("M12 4.6C2.2 6 2.2 18 12 19.4"); opacity: 0; }
+  18% { opacity: .7; }
+  50% { d: path("M12 4.6C12 8 12 16 12 19.4"); }
+  82% { opacity: .7; }
+  100% { d: path("M12 4.6C21.8 6 21.8 18 12 19.4"); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ex-mark * { animation: none; }
+  .ex-scan-x { transform: translateX(2px); }
+  .ex-hit { opacity: .85; }
+}

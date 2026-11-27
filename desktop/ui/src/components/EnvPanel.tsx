@@ -3,7 +3,7 @@
 // Connectors, Outputs (files she wrote) and Changes.
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "@/lib/store";
-import type { CtxParts, Item, Live, Status } from "@/lib/types";
+import type { CtxItem, CtxParts, CtxServer, Item, Live, McpMode, Status } from "@/lib/types";
 import { get as apiGet, post } from "@/lib/api";
 import { openExternal, openPath } from "@/lib/desktop";
 import { cn, dirname } from "@/lib/util";
@@ -319,17 +319,25 @@ function CtxSummary({ st }: { st: Partial<Status> }) {
 }
 
 /** What fills the context, in the order and colours of Claude's panel (they read well in light and dark). */
-const PARTS: { key: keyof CtxParts; label: string; color: string; tip: string }[] = [
+type PartKey = "messages" | "system_tools" | "mcp_tools" | "mcp_instructions" | "system_prompt" | "skills" | "memory";
+const PARTS: { key: PartKey; label: string; color: string; tip: string }[] = [
   { key: "messages", label: "Messages", color: "#5b8def", tip: "The conversation so far: your messages, Emilie's answers and tool results" },
   { key: "system_tools", label: "System tools", color: "#e8833a", tip: "Definitions of Emilie's built-in tools (files, shell, web, …)" },
-  { key: "mcp_tools", label: "MCP tools", color: "#2bb5a0", tip: "Tools of the connected MCP servers, and the note that lists them" },
+  { key: "mcp_tools", label: "MCP tools", color: "#2bb5a0", tip: "Definitions of the MCP tools that are loaded" },
   { key: "system_prompt", label: "System prompt", color: "#d9a632", tip: "Emilie's instructions, persona and a snapshot of this folder" },
   { key: "skills", label: "Skills", color: "#e0679b", tip: "The list of skills Emilie can load" },
-  { key: "memory", label: "Memory", color: "#9b7bea", tip: "Project memory files (EMILIE.md, …)" },
+  { key: "mcp_instructions", label: "MCP server list", color: "#7cc7bb", tip: "The note that tells Emilie which MCP servers exist" },
+  { key: "memory", label: "Memory files", color: "#9b7bea", tip: "Project memory files (EMILIE.md, …)" },
 ];
 /** "Auto-compact at" choices: 160K (max effort's point), then Claude's big-window steps (300K–1M).
  *  Anything above 70% of the model's window is hidden (and the backend caps it the same way). */
 const COMPACT_CHOICES = [160_000, 300_000, 400_000, 500_000, 1_000_000];
+
+const MCP_MODES: { value: McpMode; label: string; hint: string }[] = [
+  { value: "always", label: "Always", hint: "sent every time" },
+  { value: "on_demand", label: "On demand", hint: "loaded when needed" },
+  { value: "off", label: "Off", hint: "not started" },
+];
 
 /** 64.1K, 33K, 848.5K, 1M, 1.5M, 812 */
 function fmtTok(n: number): string {
@@ -350,7 +358,6 @@ function fmtPct(n: number, of: number): string {
 function ContextSection({ st }: { st: Partial<Status> }) {
   const setSetting = useStore((s) => s.setSetting);
   const choice = useStore((s) => s.settings.compact_at as number | null | undefined);
-  const [mcpOpen, setMcpOpen] = useState(false);
   const p = st.ctx_parts || null;
   const used = st.ctx_tokens || 0;
   const limit = Math.max(1, st.ctx_limit || p?.compact_default || 1);
@@ -404,26 +411,98 @@ function ContextSection({ st }: { st: Partial<Status> }) {
       {rows.map((r) => <Legend key={r.key} swatch={r.color} label={r.label} tip={r.tip} n={r.n} pct={fmtPct(r.n, limit)} />)}
       {!p && <div className="py-1 text-[11px] text-text-400">Measured once the session has started.</div>}
       <div className="h-[7px]" />
+      {p && p.mcp_deferred > 0 && (
+        <Legend swatch="var(--bg-400)" label="MCP tools (deferred)" n={p.mcp_deferred} pct="—"
+          tip="Not sent: loaded only when Emilie needs that server" />
+      )}
       <Legend swatch="var(--bg-400)" label="Free space" tip="Room left before older messages are summarized" n={free} pct={fmtPct(free, limit)} />
       {p?.window ? <Legend swatch="transparent" outline label="Model window" tip="This model's whole context window" n={p.window} pct="—" /> : null}
 
-      {nTools > 0 && (
-        <>
-          <button onClick={() => setMcpOpen(!mcpOpen)}
-            className="-mx-1 mt-[6px] flex h-[24px] items-center gap-[7px] rounded-[5px] px-1 text-left text-text-300 hover:bg-hover hover:text-text-100">
-            <ChevR size={9} strokeWidth={1.8} className={cn("shrink-0 text-text-400 transition-transform duration-150", mcpOpen && "rotate-90")} />
-            <span className="flex-1">MCP tools</span>
-            <span className="tabular-nums text-text-400">{nTools}</span>
-          </button>
-          {mcpOpen && servers.map((s) => (
-            <div key={s.name} className="flex h-[22px] items-center gap-2 pl-[16px] text-text-300" title={`${s.tools} tools · ~${fmtTok(s.tokens)} tokens`}>
-              <span className="min-w-0 flex-1 truncate">{s.name}</span>
-              <span className="shrink-0 tabular-nums text-text-400">{s.tools}</span>
-              <span className="w-[42px] shrink-0 text-right tabular-nums text-text-400">{fmtTok(s.tokens)}</span>
-            </div>
-          ))}
-        </>
+      <div className="h-[6px]" />
+      {servers.length > 0 && (
+        <Group label="MCP tools" count={nTools}>
+          {servers.map((s) => <McpServer key={s.name} s={s} />)}
+        </Group>
       )}
+      <ItemGroup label="System tools" items={p?.tool_items} />
+      <ItemGroup label="Skills" items={p?.skill_items} />
+      <ItemGroup label="Memory files" items={p?.memory_items} />
+      <ItemGroup label="System prompt" items={p?.prompt_items} />
+      {p && <p className="mt-[6px] text-[11px] leading-[15px] text-text-400">Estimates, about 4 characters a token.</p>}
+    </>
+  );
+}
+
+/** A part that opens into its list; a long list scrolls on its own. */
+function Group({ label, count, children }: { label: string; count: number; children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button onClick={() => setOpen(!open)} aria-expanded={open}
+        className="-mx-1 flex h-[24px] shrink-0 items-center gap-[7px] rounded-[5px] px-1 text-left text-text-300 hover:bg-hover hover:text-text-100">
+        <ChevR size={9} strokeWidth={1.8} className={cn("shrink-0 text-text-400 transition-transform duration-150", open && "rotate-90")} />
+        <span className="flex-1">{label}</span>
+        <span className="tabular-nums text-text-400">{count}</span>
+      </button>
+      {open && <div className="max-h-[220px] overflow-y-auto pr-1">{children}</div>}
+    </>
+  );
+}
+
+function ItemRow({ item, indent = 16 }: { item: CtxItem; indent?: number }) {
+  const path = /[\\/]/.test(item.name);
+  return (
+    <div className={cn("flex h-[21px] items-center gap-2", item.loaded === false ? "text-text-400" : "text-text-300")}
+      style={{ paddingLeft: indent }} title={item.loaded === false ? `${item.name} (not loaded)` : item.name}>
+      {/* a path keeps its end (the file name) when it does not fit */}
+      <span className="min-w-0 flex-1 truncate text-left" dir={path ? "rtl" : undefined}><bdi>{item.name}</bdi></span>
+      <span className="shrink-0 tabular-nums text-text-400">{fmtTok(item.tokens)}</span>
+    </div>
+  );
+}
+
+function ItemGroup({ label, items }: { label: string; items?: CtxItem[] }) {
+  if (!items?.length) return null;
+  return <Group label={label} count={items.length}>{items.map((i) => <ItemRow key={i.name} item={i} />)}</Group>;
+}
+
+/** One MCP server: how its tools are sent (a menu), what they cost, and the tools themselves. */
+function McpServer({ s }: { s: CtxServer }) {
+  const setSetting = useStore((st) => st.setSetting);
+  const modes = useStore((st) => st.settings.mcp_modes as Record<string, McpMode> | undefined);
+  const [open, setOpen] = useState(false);
+  const mode = modes?.[s.name] || s.mode;
+  const state = s.status === "off" ? "off" : s.status !== "ready" ? s.status : "";
+  return (
+    <>
+      <div className="flex h-[22px] items-center gap-2 pl-[8px] text-text-300">
+        <button onClick={() => setOpen(!open)} aria-expanded={open} disabled={!s.items.length}
+          className="flex min-w-0 flex-1 items-center gap-[6px] text-left hover:text-text-100"
+          title={`${s.name}: ${s.tools} tools`}>
+          <ChevR size={8} strokeWidth={1.8} className={cn("shrink-0 text-text-400 transition-transform duration-150", open && "rotate-90", !s.items.length && "opacity-0")} />
+          <span className="truncate">{s.name}</span>
+        </button>
+        <Menu>
+          <MenuTrigger asChild>
+            <button className="flex h-[20px] shrink-0 items-center gap-1 rounded-[5px] px-1 text-[11px] text-text-400 hover:bg-hover hover:text-text-100">
+              {MCP_MODES.find((m) => m.value === mode)?.label} <ChevD size={9} strokeWidth={1.8} />
+            </button>
+          </MenuTrigger>
+          <MenuContent align="end" className="min-w-[220px]">
+            <MenuLabel>{s.name}</MenuLabel>
+            {MCP_MODES.map((m) => (
+              <MenuItem key={m.value} checked={mode === m.value} onSelect={() => setSetting("mcp_modes", { ...modes, [s.name]: m.value })}>
+                {m.label}: {m.hint}
+              </MenuItem>
+            ))}
+          </MenuContent>
+        </Menu>
+        <span className={cn("w-[42px] shrink-0 text-right tabular-nums", s.loaded ? "text-text-100" : "text-text-400")}
+          title={state || (s.loaded ? "in context" : "not loaded: costs nothing yet")}>
+          {state || fmtTok(s.loaded ? s.tokens : s.deferred)}
+        </span>
+      </div>
+      {open && s.items.map((i) => <ItemRow key={i.name} item={i} indent={28} />)}
     </>
   );
 }

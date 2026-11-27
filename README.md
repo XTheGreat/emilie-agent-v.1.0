@@ -148,6 +148,85 @@ Changing tools ask permission like `write_file` (`/allow notebook_edit` to skip 
 parallel. MCP servers can be remote too: `{"url": "https://...", "headers": {"Authorization": "Bearer ${TOKEN}"}}`.
 Global instructions go in `%USERPROFILE%\.emilie\EMILIE.md` (loaded for every project, before the project's own file).
 
+## Web search and page reading
+
+Two tools keep tokens and credits low: `web_search(query, intent, max_results)` returns only title, domain, date, a
+snippet (max 300 characters) and the url (default 4 results, max 6); `read_page(url, focus)` then opens the chosen page
+as Markdown, at most 6,000 characters, most relevant paragraphs first when `focus` is given.
+
+**API keys.** Put them in `%USERPROFILE%\.emilie\.env` (survives reinstalling), or in `.env` at the repo root when you
+run from source. Copy the names from [.env.example](.env.example), then restart Emilie. A provider without a key is skipped.
+
+| Variable | Needed for |
+|---|---|
+| `TAVILY_API_KEY` | Tavily search |
+| `EXA_API_KEY` | Exa search |
+| `FIRECRAWL_API_KEY` | Firecrawl page reader |
+| `JINA_API_KEY` | optional: higher Jina Reader limits |
+| `SEARXNG_URL` | optional: your own SearXNG (JSON format enabled) |
+
+| Provider | Used for | Free allowance assumed (check the pricing page) |
+|---|---|---|
+| Tavily | `general`, `news`; last backup for `docs` | 1,000 credits/month |
+| Exa | `semantic` | about $10 credit/month |
+| ddgs | first for `docs`, backup for the rest | no key; needs `pip install ddgs` |
+| SearXNG | like ddgs | self-hosted |
+| Jina Reader | `read_page`, first | free without a key, rate limited |
+| Firecrawl | `read_page`, when Jina fails | 1,000 credits/month |
+| plain HTTP | `read_page`, last | free |
+
+Install ddgs into Emilie's own environment:
+
+```powershell
+& "$env:LOCALAPPDATA\Emilie\venv\Scripts\python.exe" -m pip install ddgs
+```
+
+- Limits (env): `TAVILY_LIMIT=900`, `EXA_LIMIT=900`, `FIRECRAWL_LIMIT=400` per month; `WEB_SEARCH_BUDGET=5`,
+  `WEB_READ_BUDGET=3` per task (cache hits are free). `TAVILY_DEPTH=advanced` costs 2 credits per search.
+- Cache: `./.cache/web/` (news 30 minutes, general/semantic/pages 24 hours, docs 7 days).
+- Usage counter: `%USERPROFILE%\.emilie\web_usage.json`. It counts only what Emilie spends. Log with provider, remaining
+  quota and estimated tokens: `%USERPROFILE%\.emilie\web.log`.
+- Junk domains to drop: `config/blocked_domains.txt`.
+- Privacy: queries go to the search provider, and the urls you read go to Jina or Firecrawl.
+
+Example (what the agent calls): `web_search("berita AI hari ini", intent="news")`, then
+`read_page(url, focus="model baru")`.
+
+Tests (providers are mocked): `python -m unittest discover -s tests`. The live test runs only with `TAVILY_API_KEY` and
+`EMILIE_LIVE_TESTS=1` set.
+
+## Diagrams
+
+The `render_diagram` tool turns Mermaid or PlantUML source into an SVG or PNG in `.\diagrams\` of your project. It
+asks permission first (except in trust mode) and is blocked in plan mode. The renderers are not installed with
+Emilie; install the ones you want:
+
+| | Mermaid | PlantUML |
+|---|---|---|
+| Needs | Node.js 18+, mermaid-cli | Java, Graphviz, PlantUML |
+| Windows | `winget install OpenJS.NodeJS.LTS`<br>`npm install -g @mermaid-js/mermaid-cli` | `winget install EclipseAdoptium.Temurin.21.JRE`<br>`winget install Graphviz.Graphviz`<br>`choco install plantuml` |
+| macOS | `brew install node`<br>`npm install -g @mermaid-js/mermaid-cli` | `brew install openjdk graphviz plantuml` |
+| Linux (Debian/Ubuntu) | install Node.js 18+, then<br>`npm install -g @mermaid-js/mermaid-cli` | `sudo apt install default-jre graphviz plantuml` |
+
+Open a new terminal (or restart the app) afterwards so the new commands are on `PATH`.
+
+Example: ask "draw the login flow as a flowchart", or the call itself:
+
+```json
+{"kind": "mermaid", "fmt": "svg", "filename": "login", "code": "flowchart TD\n  A[Login] --> B{Valid?}\n  B -->|yes| C[Home]\n  B -->|no| A"}
+```
+
+It answers `{"ok": true, "path": "...\\diagrams\\login.svg"}`, or `{"ok": false, "error": "..."}` with the renderer's
+own message so Emilie can fix the syntax and try again. A file with the same name is replaced (`/rewind` does not
+restore it). Source is limited to 100 KB and a render to 60 seconds. PlantUML runs with
+`PLANTUML_SECURITY_PROFILE=SANDBOX` (no `!include` of local files or URLs) unless you set that variable yourself.
+`--no-sandbox` (`emilie/builtin/puppeteer.json`) is used for Mermaid only if Chromium fails with a sandbox error.
+
+Without a local renderer you can set `KROKI_URL` (your own [Kroki](https://kroki.io) server, or `https://kroki.io`).
+The diagram source is then **sent to that server**.
+
+Tests: `python -m unittest discover -s tests -v` (tests needing a missing renderer are skipped).
+
 ## Scrolling
 
 The conversation scrolls inside Emilie (mouse wheel, touchpad, PageUp/PageDown). Tune the feel live with `/scroll`:
@@ -157,3 +236,12 @@ The settings are saved in `%USERPROFILE%\.emilie\settings.json`.
 ## Linux
 
 It also runs on Linux: `pip install -e .` then `emilie`.
+
+## Editable draw.io diagrams
+
+Install draw.io Desktop (`winget install JGraph.Draw` on Windows), or point
+`DRAWIO_PATH` at its executable. Ask Emilie to “Render examples/contoh.drawio
+as login.png and inspect the result.” The equivalent tool call is
+`render_drawio(xml=<complete XML>, filename="login", fmt="png", scale=2)`.
+The editable source and export go into `./diagrams/`. SVG and PDF exports also
+produce a sibling PNG for visual review. See [the XML style guide](emilie/builtin/DRAWIO_STYLE.md).

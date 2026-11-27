@@ -90,7 +90,7 @@ function launchedAgain(argv) {
     }
     if (a) pendingAction = a;             // the page asks for it once loaded (take-action)
     if (win) {                            // quit from the menu: the window was only hidden, its server is going away
-      win.loadFile(path.join(__dirname, "loading.html"), { query: { dark: isDark() ? "1" : "0" } });
+      win.loadFile(path.join(__dirname, "loading.html"), { query: { dark: isDark() ? "1" : "0", warm: savedSettings().desktop_theme === "warm" ? "1" : "0" } });
       win.show();
       win.focus();
       connect();
@@ -267,6 +267,13 @@ function isEveny() {
   return savedSettings().desktop_theme === "eveny";
 }
 
+/** The window's colour before the page has painted. */
+function themeBg() {
+  if (isEveny()) return "#0a0f1c";
+  if (isDark()) return "#191919";
+  return savedSettings().desktop_theme === "warm" ? "#faf9f5" : "#ffffff";
+}
+
 function loadState() {
   try {
     return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
@@ -286,7 +293,7 @@ function saveState() {
 
 function createWindow() {
   const dark = isDark();
-  const bg = isEveny() ? "#0a0f1c" : dark ? "#191919" : "#faf9f5";
+  const bg = themeBg();
   const st = loadState();
   win = new BrowserWindow({
     width: st.width || 1280, height: st.height || 860, x: st.x, y: st.y, minWidth: 760, minHeight: 520,
@@ -355,7 +362,7 @@ function createWindow() {
     prefs.nodeIntegration = false;
     prefs.contextIsolation = true;
   });
-  win.loadFile(path.join(__dirname, "loading.html"), { query: { dark: dark ? "1" : "0" } });
+  win.loadFile(path.join(__dirname, "loading.html"), { query: { dark: dark ? "1" : "0", warm: savedSettings().desktop_theme === "warm" ? "1" : "0" } });
 }
 
 async function boot() {
@@ -383,7 +390,7 @@ async function failed(title, detail) {
   if (r.response === 0) {
     logTail = [];
     await stopServer();
-    win.loadFile(path.join(__dirname, "loading.html"), { query: { dark: isDark() ? "1" : "0" } });
+    win.loadFile(path.join(__dirname, "loading.html"), { query: { dark: isDark() ? "1" : "0", warm: savedSettings().desktop_theme === "warm" ? "1" : "0" } });
     try {
       const url = await startServer();
       win.loadURL(url + "&shell=electron");

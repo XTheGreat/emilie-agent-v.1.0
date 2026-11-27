@@ -24,7 +24,7 @@ export type Item =
   | {
       kind: "user"; id: string; cid?: string; text: string; files?: string[]; images?: string[];
       n_images?: number; hidden_images?: number; command?: string | null; prompt?: string | null;
-      queued?: boolean; spoken?: boolean; mi?: number; failed?: boolean;
+      queued?: boolean; spoken?: boolean; mi?: number; failed?: boolean; at?: number;
     }
   | { kind: "assistant"; id: string; text: string; streaming?: boolean; spontaneous?: boolean; mi?: number; at?: number }
   | { kind: "thinking"; id: string; text: string; mi?: number }
@@ -42,9 +42,16 @@ export type Item =
 export interface Todo { content: string; status: "pending" | "in_progress" | "completed"; activeForm?: string }
 
 /** What fills the context (estimated tokens), for the Context section of the Environment panel. */
+export interface CtxItem { name: string; tokens: number; loaded?: boolean }
+export interface CtxServer {
+  name: string; tools: number; tokens: number; deferred: number; mode: McpMode; loaded: boolean; status: string; items: CtxItem[];
+}
 export interface CtxParts {
   messages: number; system_tools: number; mcp_tools: number; system_prompt: number; skills: number; memory: number;
-  mcp_servers: { name: string; tools: number; tokens: number }[];
+  mcp_instructions: number;         // the list of MCP servers in the system prompt
+  mcp_deferred: number;             // MCP tool definitions NOT sent (on demand, not loaded yet)
+  mcp_servers: CtxServer[];
+  tool_items: CtxItem[]; skill_items: CtxItem[]; memory_items: CtxItem[]; prompt_items: CtxItem[];
   window: number | null;            // the model's window when known (/config context_limit or a known small model)
   compact_default: number;          // the effort level's auto-compact point (used when compact_at is not set)
 }
@@ -66,6 +73,12 @@ export type Request =
 
 export interface Command { name: string; desc: string; kind: "builtin" | "skill" | "command" }
 
+export interface VoiceClip {
+  levels: number[];
+  intervalMs: number;
+  startedAt: number;   // Unix milliseconds at playback start
+}
+
 export interface Live {
   wid: string;
   sid: string | null;
@@ -75,7 +88,10 @@ export interface Live {
   status: Partial<Status>;
   commands: Command[];
   busy: boolean;
-  working: { since: number; tokens: number; activity?: string | null; streaming: boolean; voiceOn?: boolean; voice?: "" | "replying" | "speaking" } | null;
+  working: {
+    since: number; tokens: number; activity?: string | null; streaming: boolean;
+    voiceOn?: boolean; voice?: "" | "replying" | "speaking"; voiceClip?: VoiceClip | null;
+  } | null;
   request: Request | null;
   todos: Todo[];
   stale: boolean;
@@ -112,3 +128,5 @@ export type View =
   | { kind: "projects" }
   | { kind: "artifacts" }
   | { kind: "customize"; tab?: "plugins" | "skills" | "connectors" | "scheduled" };
+
+export type McpMode = "always" | "on_demand" | "off";

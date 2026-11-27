@@ -18,16 +18,18 @@ const MODE_ORDER = ["ask", "trust", "plan"];
 export function SessionView({ live, envFloat }: { live: Live & { loaded?: boolean }; envFloat?: boolean }) {
   const s = useStore.getState();
   const scroller = useRef<HTMLDivElement>(null);
+  const column = useRef<HTMLDivElement>(null);
+  const bottom = useRef<HTMLDivElement>(null);
   const dock = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   // Following the bottom turns the browser's scroll anchoring off. Anchoring keeps what is on screen in place when rows
   // above it change: past 80 rows the oldest row leaves the top as each new one arrives, the browser scrolls up by its
   // height, and when the new row is as tall as the old one nothing changes size to say "follow": the newest line (and the
   // working line) slid under the message box. Off while pinned to the bottom; on while the user reads further up.
-  const pin = (on: boolean) => {
+  const pin = useCallback((on: boolean) => {
     stick.current = on;
     if (scroller.current) scroller.current.style.overflowAnchor = on ? "none" : "";
-  };
+  }, []);
   const [showJump, setShowJump] = useState(false);
   const [dockH, setDockH] = useState(96);
   const typingAt = useRef(0);
@@ -36,17 +38,18 @@ export function SessionView({ live, envFloat }: { live: Live & { loaded?: boolea
   useLayoutEffect(() => {
     const el = dock.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => setDockH(el.offsetHeight));
+    const ro = new ResizeObserver(([entry]) => setDockH(Math.round(entry.borderBoxSize[0].blockSize)));
     ro.observe(el);
     setDockH(el.offsetHeight);
     return () => ro.disconnect();
   }, []);
 
   const items = live.items;
+  const structure = useTranscriptStructure(items);
   // "turn" markers ("done in 3s") are not drawn; they only tell where a turn ended
   // a tool call still marked "running" after the turn ended (stopped half way) is interrupted: nothing animates for it
-  const shown = useMemo(() => (live.busy || !items.some((i) => i.kind === "tool" && i.status === "running") ? items
-    : items.map((i) => (i.kind === "tool" && i.status === "running" ? { ...i, status: "interrupted" } as Item : i))), [items, live.busy]);
+  const shown = useMemo(() => (live.busy || !structure.some((i) => i.kind === "tool" && i.status === "running") ? structure
+    : structure.map((i) => (i.kind === "tool" && i.status === "running" ? { ...i, status: "interrupted" } as Item : i))), [structure, live.busy]);
   const rows = useMemo(() => groupItems(shown.filter((i) => i.kind !== "turn")), [shown]);
   // The run of tool calls that is going on now is drawn by the status line at the bottom (icon, what it is doing, seconds
   // and a chevron beside it). Once she moves on to something else it becomes the summary line above, with the steps under it.
@@ -66,68 +69,55 @@ export function SessionView({ live, envFloat }: { live: Live & { loaded?: boolea
   const endIds = useMemo(() => {
     const out = new Set<string>();
     let last = -1;
-    items.forEach((it, i) => { if (it.kind === "assistant") last = i; });
-    items.forEach((it, i) => {
+    structure.forEach((it, i) => { if (it.kind === "assistant") last = i; });
+    structure.forEach((it, i) => {
       if (it.kind !== "assistant") return;
       if (voiceBusy && i === last) return;               // the voice is still on its way: no copy / share row until it is done
-      const next = items[i + 1];
+      const next = structure[i + 1];
       if (next ? next.kind === "turn" || next.kind === "user" : !live.busy) out.add(it.id);
     });
     return out;
-  }, [items, live.busy, voiceBusy]);
-  const historyNow = useMemo(() => items.filter((i) => i.kind === "user").map((i: any) => String(i.text)).filter(Boolean).slice(-50), [items]);
-  const history = useSame(historyNow, historyNow.join("\u0001"));
+  }, [structure, live.busy, voiceBusy]);
+  const historyNow = useMemo(() => structure.filter((i) => i.kind === "user").map((i) => i.text).filter(Boolean).slice(-50), [structure]);
+  const history = useSame(historyNow, useMemo(() => historyNow.join("\u0001"), [historyNow]));
 
-  // follow the bottom while new output arrives, unless the user scrolled up
-  // (not on every render: reading scrollHeight forces a layout of the whole column; the column's own size tells when to follow)
-  const column = useRef<HTMLDivElement>(null);
+  // Observe the last pixel of the column. Scrolling within history doesn't need a
+  // JS handler or a synchronous measurement of the transcript on every frame.
   useLayoutEffect(() => {
-    const el = scroller.current, col = column.current;
-    if (!el || !col) return;
-    const follow = () => { if (stick.current) el.scrollTop = el.scrollHeight; };
-    follow();
-    const ro = new ResizeObserver(follow);
-    ro.observe(col);
-    return () => ro.disconnect();
-  }, [live.wid]);
-  useEffect(() => {
+    const el = scroller.current, col = column.current, edge = bottom.current;
+    if (!el || !col || !edge) return;
     pin(true);
-    requestAnimationFrame(() => {
-      const el = scroller.current;
-      if (el) el.scrollTop = el.scrollHeight;
+    setShowJump(false);
+    let columnHeight = el.scrollHeight;
+    el.scrollTop = columnHeight;
+    const sizes = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.target === col) columnHeight = entry.borderBoxSize[0].blockSize;
+      }
+      if (stick.current) el.scrollTop = columnHeight;
     });
-  }, [live.wid]);
-  // Following the bottom is decided by what the USER does, never by how the scroll position moved: content that grows
-  // or shrinks (a status line coming and going, rows measured late) moves the position by itself and must neither
-  // pull the view back down nor let it go. Wheel up lets go at once; reaching the bottom again (by wheel, keys or the
-  // scrollbar) picks it up again; dragging the scrollbar follows where the thumb is.
-  const dragging = useRef(false);
-  const frame = useRef(0);
-  const onScroll = () => {
-    if (frame.current) return;                      // at most once per frame, however many scroll events came
-    frame.current = requestAnimationFrame(() => {
-      frame.current = 0;
-      const el = scroller.current;
-      if (!el) return;
-      const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
-      if (dragging.current) pin(gap < 6);
-      else if (gap < 6 && !stick.current) pin(true);
-      setShowJump((v) => { const n = !stick.current && gap >= 6; return v === n ? v : n; });
-    });
-  };
+    sizes.observe(col, { box: "border-box" });
+    sizes.observe(el);
+    let nearEnd = true;
+    const end = new IntersectionObserver((entries) => {
+      nearEnd = entries[entries.length - 1].isIntersecting;
+      pin(nearEnd);
+      setShowJump(!nearEnd);
+    }, { root: el, rootMargin: "0px 0px 4px 0px" });
+    end.observe(edge);
+    // A very short wheel movement can finish within the bottom tolerance.
+    const settle = () => { if (nearEnd && !stick.current) pin(true); };
+    el.addEventListener("scrollend", settle);
+    return () => {
+      sizes.disconnect();
+      end.disconnect();
+      el.removeEventListener("scrollend", settle);
+    };
+  }, [live.wid, pin]);
   const onWheel = (e: React.WheelEvent) => { if (e.deltaY < 0 && stick.current) pin(false); };
-  const onPointerDown = (e: React.PointerEvent) => {
-    if (e.target !== scroller.current) return;               // the scrollbar itself, not the conversation
-    dragging.current = true;
-    window.addEventListener("pointerup", () => { dragging.current = false; }, { once: true });
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.target === e.currentTarget && ["PageUp", "Home", "ArrowUp"].includes(e.key)) pin(false);
   };
-  useEffect(() => {
-    const el = scroller.current;
-    if (!el) return;
-    const key = (e: KeyboardEvent) => { if (["PageUp", "Home", "ArrowUp"].includes(e.key) && document.activeElement === el) pin(false); };
-    window.addEventListener("keydown", key);
-    return () => window.removeEventListener("keydown", key);
-  }, []);
   const jump = () => {
     pin(true);
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" });
@@ -143,6 +133,22 @@ export function SessionView({ live, envFloat }: { live: Live & { loaded?: boolea
   }, [wid]);
   const runCommand = useCallback((cmd: string) => send(cmd, [], []), [send]);
   const rewind = useCallback((n: number) => send(`/rewind ${n} both`, [], []), [send]);
+  const renderRow = useCallback((r: Row, i: number, inWorkingLine = false) => {
+    const nodes: React.ReactElement[] = [];
+    if (!inWorkingLine) nodes.push(
+      <RowView key={r.key} r={r} checkpoints={checkpoints} onRewind={rewind}
+        endOfTurn={"item" in r && endIds.has(r.item.id)} fresh={i >= rows.length - 3} />,
+    );
+    const tasks = taskLists.get(i);
+    if (tasks) nodes.push(<TaskBlock key={tasks.key} todos={tasks.todos} />);
+    return nodes;
+  }, [rows.length, taskLists, endIds, checkpoints, rewind]);
+  const earlierRows = useMemo(() => rows.slice(start, -1).flatMap((r, j) => renderRow(r, start + j)), [rows, start, renderRow]);
+  const lastRow = rows.at(-1);
+  const visibleRows = lastRow ? earlierRows.concat(renderRow(
+    structure === items ? lastRow : { key: lastRow.key, item: items[items.length - 1] },
+    rows.length - 1, !!liveGroup,
+  )) : earlierRows;
   const st = live.status;
   const mode = st.mode || "ask";
   const req = live.request;
@@ -173,10 +179,10 @@ export function SessionView({ live, envFloat }: { live: Live & { loaded?: boolea
     <div className="relative h-full min-w-0 flex-1">
       {/* The conversation fills the whole height and scrolls behind the message box (its scrollbar runs down to the
           bottom of the window, as in Claude Code); `dockH` keeps the last message clear of the box. */}
-      <div ref={scroller} onScroll={onScroll} onWheel={onWheel} onPointerDown={onPointerDown} className="absolute inset-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">
+      <div ref={scroller} onWheel={onWheel} onKeyDown={onKeyDown} className="chat-scroll absolute inset-0 overflow-y-auto [scrollbar-gutter:stable_both-edges] [will-change:scroll-position]">
         {/* Claude Code's geometry, measured: the conversation sits 14px inside the message box on the left and 13px on the
             right (where your messages end); Emilie's text stops 43px earlier so lines stay short and easy to read. */}
-        <div ref={column} className="mx-auto flex w-full flex-col gap-3 pl-[34px] pr-[33px] pt-5"
+        <div ref={column} className="relative mx-auto flex w-full flex-col gap-3 pl-[34px] pr-[33px] pt-5"
           style={{ maxWidth: "calc(var(--col-w) + 40px)", paddingBottom: dockH + 16 }}>
           {!live.loaded && !items.length && <div className="flex justify-center py-16"><Spinner size={20} /></div>}
           {live.loaded && !items.length && !live.busy && (
@@ -189,23 +195,15 @@ export function SessionView({ live, envFloat }: { live: Live & { loaded?: boolea
               Show {Math.min(80, start)} earlier ({start} hidden)
             </button>
           )}
-          {rows.slice(start).flatMap((r, j) => {
-            const i = start + j;
-            const row = (
-              <RowView key={r.key} r={r} checkpoints={checkpoints} onRewind={rewind} endOfTurn={"item" in r && endIds.has(r.item.id)}
-                fresh={i >= rows.length - 3} />
-            );
-            const t = taskLists.get(i);
-            if (liveGroup && i === rows.length - 1) return t ? [<TaskBlock key={t.key} todos={t.todos} />] : [];
-            return t ? [row, <TaskBlock key={t.key} todos={t.todos} />] : [row];
-          })}
+          {visibleRows}
           {(live.busy || !!live.working?.voice) && live.working && !req && (
             <Working since={live.working.since} tool={live.busy ? lastRunningTool(items) : undefined}
               replying={(() => { const l = items[items.length - 1]; return l?.kind === "assistant" && !!l.streaming; })()} activity={live.working.activity} streaming={live.working.streaming}
-              voice={live.working.voice} voiceOn={live.working.voiceOn}
+              voice={live.working.voice} voiceOn={live.working.voiceOn} voiceClip={live.working.voiceClip}
               thinking={items[items.length - 1]?.kind === "thinking"} group={liveGroup}
               thought={(() => { const l = items[items.length - 1]; return l?.kind === "thinking" ? String(l.text || "") : undefined; })()} />
           )}
+          <div ref={bottom} aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 h-px" />
         </div>
       </div>
       {!!st.call && !live.closed && <CallWindow wid={live.wid} />}
@@ -259,6 +257,24 @@ export function SessionView({ live, envFloat }: { live: Live & { loaded?: boolea
 }
 
 const closeEnvFloat = () => useStore.setState({ envFloat: false });
+
+/** A delta to the last, still-streaming reply changes its content, while all
+ *  row keys, tool groups, task lists and composer history stay the same. The
+ *  live item itself is supplied to the final row. Snapshots, edits elsewhere,
+ *  queued messages and the end of a stream take the normal regrouping path. */
+function useTranscriptStructure(items: Item[]): Item[] {
+  const cached = useRef(items);
+  return useMemo(() => {
+    const prev = cached.current;
+    if (prev === items) return prev;
+    const last = items.at(-1), old = prev.at(-1);
+    if (last?.kind === "assistant" && last.streaming && old?.kind === "assistant" && old.streaming
+      && last.id === old.id && prev.length === items.length
+      && prev.every((it, i) => i === items.length - 1 || it === items[i])) return prev;
+    cached.current = items;
+    return items;
+  }, [items]);
+}
 
 /** `value` as it was the last time `key` changed: an array rebuilt with the same contents stays the same object. */
 function useSame<T>(value: T, key: string): T {

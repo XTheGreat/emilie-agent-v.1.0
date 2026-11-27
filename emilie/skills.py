@@ -186,7 +186,7 @@ def load(cwd: str) -> None:
     _sync_tool()
 
 
-BRIEF_CHARS, BRIEF_TRIGGERS = 190, 5
+BRIEF_CHARS, BRIEF_TRIGGERS = 120, 3
 
 
 def _brief(s: "Skill") -> str:

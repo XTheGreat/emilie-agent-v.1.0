@@ -1,0 +1,3 @@
+# Domain sampah / SEO farm yang dibuang dari hasil web_search. Satu domain per baris, subdomain ikut diblokir.
+# Contoh (hapus tanda # untuk mengaktifkan):
+# contoh-seo-farm.com

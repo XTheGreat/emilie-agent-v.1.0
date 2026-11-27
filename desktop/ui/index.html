@@ -8,7 +8,8 @@
     <link rel="icon" href="/emilie-icon.png" />
     <style>
       html, body { margin: 0; height: 100%; background: #191919; }
-      html.light, html.light body { background: #faf9f5; }
+      html.light, html.light body { background: #ffffff; }
+      html.warm, html.warm body { background: #faf9f5; }
       html.eveny, html.eveny body { background: #0a0f1c; }
     </style>
     <script>
@@ -16,7 +17,7 @@
       try {
         var t = localStorage.getItem("emilie-theme") || "dark";
         var dark = t === "dark" || (t === "auto" && matchMedia("(prefers-color-scheme: dark)").matches);
-        document.documentElement.className = t === "eveny" ? "dark eveny" : dark ? "dark" : "light";
+        document.documentElement.className = t === "eveny" ? "dark eveny" : t === "warm" ? "light warm" : dark ? "dark" : "light";
         if (t === "eveny") dark = true;
       } catch (e) {}
     </script>

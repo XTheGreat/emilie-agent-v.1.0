@@ -34,17 +34,17 @@ class Effort:
 
 
 LEVELS: dict[str, Effort] = {
-    "low": Effort("low", 1024, 4_000, 150, 6, 12_000,
+    "low": Effort("low", 4096, 4_000, 150, 6, 12_000,
                   "Answer very briefly (at most 3 sentences). Get straight to the point, no filler. "
                   "Avoid tool calls that are not really needed.",
                   N_('saver: thinks little, short answers, small tool output')),
-    "medium": Effort("medium", 4096, 10_000, 500, 15, 40_000,
+    "medium": Effort("medium", 16384, 10_000, 500, 15, 40_000,
                      "Answer concisely and to the point; explain only as needed.",
                      N_("balanced (default): the model's usual thinking")),
-    "high": Effort("high", 8192, 20_000, 2000, 30, 90_000,
+    "high": Effort("high", 20000, 20_000, 2000, 30, 90_000,
                    "Work carefully, explain important decisions, and verify the result.",
                    N_('thorough: thinks longer, looser answer and context limits')),
-    "max": Effort("max", 16384, 40_000, 2000, 150, 160_000,
+    "max": Effort("max", 20000, 40_000, 2000, 150, 160_000,
                   "Very thorough: check edge cases and verify by running tests when available.",
                   N_('deepest thinking, loosest caps: spends tokens freely')),
 }

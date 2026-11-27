@@ -51,7 +51,7 @@ export function CheckpointsPane() {
     if (ok) useStore.getState().send(wid, `/rewind ${c.n} ${what}`, [], []);
   };
 
-  const btn = "rounded-[5px] border border-border-300 px-2 py-[2px] text-[11px] text-text-200 hover:bg-hover hover:text-text-000 disabled:opacity-40 disabled:hover:bg-transparent";
+  const btn = "btn-contrast rounded-[5px] px-2 py-[3px] text-[11px]";
 
   return (
     <div className="h-full overflow-y-auto px-2.5 pb-3 pt-1 text-[11.5px]">

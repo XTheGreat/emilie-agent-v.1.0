@@ -63,8 +63,10 @@ export const Sliders = wrap(L.SlidersHorizontal);
 export const Laptop = wrap(L.Laptop);
 export const GitBranch = wrap(L.GitBranch);
 export const Rewind = wrap(L.Rewind);
+export const RotateCcw = wrap(L.RotateCcw);
 export const Wand = wrap(L.WandSparkles);
 export const ListTodo = wrap(L.ListTodo);
+export const Activity = wrap(L.Activity);
 export const Circle = wrap(L.Circle);
 export const CircleDot = wrap(L.CircleDot);
 export const Hammer = wrap(L.Hammer);
@@ -128,6 +130,30 @@ export const Files = wrap(L.Files);
 export const Table = wrap(L.Sheet);
 export const ChartColumn = wrap(L.ChartNoAxesColumn);
 export const Blend = wrap(L.Blend);
+// the project panels (Git, Scripts, Problems, Tests, HTTP, Ports, Notes, Database)
+export const GitCommit = wrap(L.GitCommitHorizontal);
+export const GitMerge = wrap(L.GitMerge);
+export const GitBranchPlus = wrap(L.GitBranchPlus);
+export const GitPullRequest = wrap(L.GitPullRequest);
+export const Flask = wrap(L.FlaskConical);
+export const SendIcon = wrap(L.SendHorizontal);
+export const Port = wrap(L.EthernetPort);
+export const StickyNote = wrap(L.StickyNote);
+export const Database = wrap(L.Database);
+export const StopCircle = wrap(L.CircleStop);
+export const Minus = wrap(L.Minus);
+export const PullIcon = wrap(L.ArrowDownToLine);
+export const PushIcon = wrap(L.ArrowUpFromLine);
+export const FetchIcon = wrap(L.CloudDownload);
+export const Package = wrap(L.Package);
+export const Server = wrap(L.Server);
+export const TableIcon = wrap(L.Table2);
+export const Braces = wrap(L.Braces);
+export const ListChecks = wrap(L.ListChecks);
+export const Tag = wrap(L.Tag);
+export const CheckBig = wrap(L.CircleCheckBig);
+export const CircleSlash = wrap(L.CircleSlash);
+export const RotateCw = wrap(L.RotateCw);
 
 // ------------------------------------------------------------------ icons drawn like the Claude Code desktop app (16px grid)
 function Svg({ size = 13, strokeWidth = 1.35, children, ...p }: P & { children: React.ReactNode }) {
@@ -180,6 +206,13 @@ export const GearSm = (p: P) => (
 /** a box with ± (the Changes pane) */
 export const DiffBox = (p: P) => <Svg {...p}><rect x="2.5" y="2.5" width="11" height="11" rx="2" /><path d="M8 5v4M6 7h4M6 11h4" /></Svg>;
 export const BranchSm = (p: P) => <Svg {...p}><circle cx="4.5" cy="3.8" r="1.5" /><circle cx="4.5" cy="12.2" r="1.5" /><circle cx="11.5" cy="5.5" r="1.5" /><path d="M4.5 5.3v5.4M11.5 7c0 2.5-3.5 2.2-6.4 4" /></Svg>;
+/** three small panels and a plus: the title bar's "More panels" */
+export const PanelsPlus = (p: P) => (
+  <Svg {...p}>
+    <rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1.2" /><rect x="9" y="2.5" width="4.5" height="4.5" rx="1.2" />
+    <rect x="2.5" y="9" width="4.5" height="4.5" rx="1.2" /><path d="M11.25 9.1v4.3M9.1 11.25h4.3" />
+  </Svg>
+);
 
 // kept for older call sites
 export const ChatSpark = ChatBubble;

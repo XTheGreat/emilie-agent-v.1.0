@@ -19,6 +19,8 @@
     "[{MUTED}]compacting history…[/]": "[{MUTED}]memadatkan riwayat…[/]",
     "[{WARN}]answer cut off by the effort limit {0} ({1} tokens). Use /effort to raise it[/]": "[{WARN}]jawaban terpotong oleh batas effort {0} ({1} token). Pakai /effort untuk menaikkannya[/]",
     "[{MUTED}]image attached → using vision model: {VISION_MODEL}[/]": "[{MUTED}]gambar terlampir → memakai model vision: {VISION_MODEL}[/]",
+    "[{MUTED}]effort limit ({0} rounds, {1}): continuing automatically[/]": "[{MUTED}]batas effort ({0} putaran, {1}): dilanjutkan otomatis[/]",
+    "[{MUTED}]effort limit: waiting {0}s before continuing[/]": "[{MUTED}]batas effort: menunggu {0} dtk sebelum lanjut[/]",
     "Stopped: reached the limit of {0} rounds for effort [bold]{1}[/]. Type 'continue' or raise it with /effort high.": "Berhenti: batas {0} putaran untuk effort [bold]{1}[/] tercapai. Ketik 'lanjut' atau naikkan dengan /effort high.",
     "[{WARN}]automatic compaction failed: {e}[/]": "[{WARN}]pemadatan otomatis gagal: {e}[/]",
     "[{MUTED}]note: make sure the model supports images (EMILIE_VISION_MODEL)[/]": "[{MUTED}]catatan: pastikan modelnya mendukung gambar (EMILIE_VISION_MODEL)[/]",

@@ -17,11 +17,14 @@ from .i18n import t as tr_
 from . import claude, clip, context, hooks, session, skills, tools, ui
 from . import companion, diagnostics, language, persona, ratelimit, reasoning, trim, usage_log, voice, workspace
 from .config import API_KEY, BASE_URL, MODEL, PROVIDER, PROVIDER_ID, VISION_MODEL
-from .effort import Effort, load_settings
+from .effort import LEVELS, Effort, load_settings
 from .policy import Policy, WRITE_TOOLS
 from .toolguide import TOOL_GUIDE
+from . import web
 from .stream import StreamView, is_quota_error
 from .theme import ERR, MUTED, ROSE, WARN
+
+DRAWIO_STYLE = (Path(__file__).parent / "builtin" / "DRAWIO_STYLE.md").read_text(encoding="utf-8")
 
 BASE_SYSTEM = """You are Emilie, a coding companion in the terminal. Friendly, careful and concise.
 Working directory: {cwd}
@@ -34,8 +37,9 @@ Working rules:
 - If a message contains [Image #n], that is an image the user attached. When it is written as [Image #n: <path>], that
   path is a real file on disk (kept in ~/.emilie/images): use it whenever a tool needs a file, e.g. to upload or send the
   image in a browser or chat app. Recent images can also be listed with glob in that folder.
-- For anything current or unknown (news, docs, prices, versions), use web_search first, then web_fetch on the best URL.
-  Prefer these over driving a browser when you only need to read information.
+- Use web_search only for things that can change (news, prices, latest versions, schedules, status, new docs) or when the
+  user asks for sources, not for stable knowledge. Then read the best 1-2 results with read_page. Prefer these over
+  driving a browser when you only need to read information.
 - For wide searches ("where is X handled", "survey this codebase", multi-page web research) delegate to the task tool:
   a read-only sub-agent investigates in its own context and returns a short report. Do small lookups yourself.
 - Jupyter notebooks: change cells with notebook_edit and run them with notebook_run; never edit the .ipynb JSON by hand.
@@ -46,7 +50,8 @@ Working rules:
   matching mcp__ tool and use it. Also check skills: a listed skill may already describe how to do the job.
 - Never say you lack a capability without checking the tools you actually have; if truly none fits, say which tool or
   MCP server would be needed and how the user can add it (/mcp).
-- MANDATORY RULES for MCP tools (apply only when the tool is in your tool list):
+- MANDATORY RULES for MCP tools (apply when the tool is in your tool list, or its server is listed as "on demand":
+  then call load_mcp first):
   1. DOCS WHEN IT MATTERS. Before you write or change code that uses an external library or framework (FastAPI,
      SQLAlchemy, React, Next.js, Django, pandas, Playwright, any pip/npm package), check it with the context7 tools
      (resolve the library id, then get the docs) when you are not sure of the exact API, the library is new or changes
@@ -70,7 +75,7 @@ Working rules:
     project or person, or asks you to remember something, store it. At the start of a task that may depend on past
     context, search it first.
   * mcp__browser__*: a real browser for sites you must interact with (log in, click, fill forms, upload, screenshot).
-    For only reading a page, web_fetch is faster. Take a snapshot of the page before clicking so you use valid targets.
+    For only reading a page, read_page is faster. Take a snapshot of the page before clicking so you use valid targets.
 - When an mcp__ tool fails, read the error, fix the arguments and retry once; if it still fails, tell the user plainly.
 - Make documents with the Office tools above, not by hand-writing XML or a throwaway script; save them in the working
   directory and tell the user the file path.
@@ -156,6 +161,17 @@ REUNION_NOTE = ("(While the user was silent you spoke up on your own {n} time(s)
                 "or a soft 'I was a bit lonely', warm, then answer what they said. Never scold.)")
 GLANCE_MARK = "[Automatic camera glance during the video call: the user said nothing.]"
 MAX_IGNORED = 4            # after this many unanswered remarks she stays quiet until the user speaks
+
+
+def _call_slot(calls: dict, index, call_id: str | None) -> dict:
+    """The tool call a streamed fragment belongs to. Fragments are matched by index, but Gemini's OpenAI-compatible
+    stream can give parallel calls the same index: a new id then starts a new call, or two calls would be glued into
+    one ("docx_readdocx_read") that the provider refuses with HTTP 400 for the rest of the session."""
+    key = next((k for k in reversed(calls) if k[0] == index), None)
+    if key is None or (call_id and calls[key]["id"] and calls[key]["id"] != call_id):
+        key = (index, len(calls))
+        calls[key] = {"id": "", "name": "", "args": ""}
+    return calls[key]
 
 
 class QuotaExhausted(Exception):
@@ -249,6 +265,11 @@ def _without_media(messages: list) -> list:
     return out
 
 
+def schema_tokens(schema: dict) -> int:
+    """A tool definition as it is sent: the whole JSON (names of fields too), about 4 characters a token."""
+    return len(json.dumps(schema, ensure_ascii=False)) // 4 + 1
+
+
 class Agent:
     def __init__(self, console: Console, policy: Policy, effort: Effort):
         self.console = console
@@ -256,6 +277,7 @@ class Agent:
         self.model = load_settings().get("model") or MODEL
         self.messages: list[dict] = []       # without system; the system prompt is built per call
         self.todos: list[dict] = []
+        self.mcp_loaded: set[str] = set()     # on-demand MCP servers whose tools this conversation has asked for
         self.salvaged = 0                      # steps of an interrupted turn that were KEPT (provider error), for the UI
         self._resume_note = ""                 # "provider" | "user": the next message continues a turn that was cut short
         self.usage = Usage(lambda: (PROVIDER_ID, self.active_model))
@@ -301,14 +323,37 @@ class Agent:
             {"jobs": {"type": "array", "items": {"type": "object", "properties": {
                 "description": {"type": "string"}, "prompt": {"type": "string"}}, "required": ["prompt"]}}},
             ["jobs"]), "agent")
+        tools.register("load_mcp", self.load_mcp, tools.schema(
+            "load_mcp", "Add the tools of an on-demand MCP server (listed in the system prompt) to your tool list. Call "
+                        "it before the first use of that server; the tools are available from your next step.",
+            {"server": {"type": "string", "description": "server name"}}, ["server"]), "agent")
         tools.register("task", self.run_subagent, tools.schema(
             "task", "Delegate a research job to a sub-agent with its own clean context. It can only READ (read_file, "
-                    "grep, glob, web_search, web_fetch) and returns one written report. Use it for wide searches, "
+                    "grep, glob, web_search, read_page) and returns one written report. Use it for wide searches, "
                     "'where/how is X done in this codebase', or web research, so the details do not fill your context. "
                     "Give it a complete, self-contained brief: it cannot see this conversation.",
             {"description": {"type": "string", "description": "3-5 word label"},
              "prompt": {"type": "string", "description": "the full brief: what to find and what to report back"}},
             ["description", "prompt"]), "agent")
+
+    # ------------------------------------------------------------ MCP servers loaded when needed
+    def load_mcp(self, server: str) -> str:
+        from . import mcp as _mcp
+        srv = _mcp.SERVERS.get(server)
+        if srv is None or srv.status == "off":
+            names = ", ".join(s.name for s in _mcp.SERVERS.values() if s.status != "off") or "none"
+            why = "is switched off by the user" if srv else "does not exist"
+            return f"ERROR: MCP server '{server}' {why}. Available: {names}."
+        if srv.status == "starting":
+            _mcp.wait_ready(30)
+        if srv.status != "ready":
+            return f"ERROR: MCP server '{server}' is {srv.status}. {srv.error}".strip()
+        self.mcp_loaded.add(server)
+        return f"Loaded {len(srv.tool_names)} tools: " + ", ".join(srv.tool_names)
+
+    def tool_schemas(self) -> list[dict]:
+        from . import mcp as _mcp
+        return _mcp.visible(tools.SCHEMAS, self.mcp_loaded)
 
     # ------------------------------------------------------------ images read with read_file
     def _flush_images(self) -> None:
@@ -345,10 +390,11 @@ class Agent:
         return "Not in plan mode: nothing to approve. Just continue with the work."
 
     # ------------------------------------------------------------ subagent
-    SUB_TOOLS = ("read_file", "grep", "glob", "web_search", "web_fetch", "docx_read", "xlsx_read", "pptx_read")
+    SUB_TOOLS = ("read_file", "grep", "glob", "web_search", "read_page", "web_fetch", "docx_read", "xlsx_read", "pptx_read")
     SUB_ROUNDS = 12
     SUB_SYSTEM = ("You are a research sub-agent working for another agent. Working directory: {cwd}\n{platform}\n"
-                  "You can only read: read_file, grep, glob, web_search, web_fetch. You cannot change anything.\n"
+                  "You can only read: read_file, grep, glob, web_search, read_page, web_fetch. You cannot change anything or run "
+                  "commands. For file sizes or the largest files use glob with sort=\"size\".\n"
                   "Investigate the brief efficiently (few, targeted calls), then reply with ONE final report: the answer "
                   "first, then the evidence (file paths with line numbers, or URLs). Be concise; no preamble.")
 
@@ -389,7 +435,8 @@ class Agent:
         if not (prompt or "").strip():
             return "ERROR: empty prompt"
         schemas = [tools.TOOLS[n][1] for n in self.SUB_TOOLS if n in tools.TOOLS]
-        system = self.SUB_SYSTEM.format(cwd=os.getcwd(), platform=tools.PLATFORM_NOTE)
+        system = self.SUB_SYSTEM.format(cwd=os.getcwd(),            # not PLATFORM_NOTE: it is about the bash tool
+                                        platform="OS: Windows." if tools.IS_WIN else "") + "\n" + web.today_note()
         self.console.print(tr_('[{MUTED}]sub-agent: {0}[/]', description or prompt[:40], MUTED=MUTED))
 
         def run_tool(name: str, args: dict) -> str:
@@ -462,6 +509,7 @@ class Agent:
         cache_control, DeepSeek and others automatically) only reuses it up to the first difference."""
         from . import mcp as _mcp
         s = BASE_SYSTEM.format(cwd=os.getcwd(), platform=tools.PLATFORM_NOTE) + TOOL_GUIDE    # how to use each tool well
+        s += "\n\n" + DRAWIO_STYLE
         ps = persona.section()
         if ps:
             s += "\n\n" + ps
@@ -473,6 +521,7 @@ class Agent:
             s += "\n\n# Project memory\n" + self.memory_text
         # ---- from here on: what changes (MCP servers coming and going, /effort, the mode, language, voice, a call)
         s += _mcp.inventory()                                                                 # the MCP tools connected now
+        s += "\n\n" + web.today_note()
         s += "\n\nAnswer style: " + self.effort.style
         if self.policy.mode == "plan":
             s += ("\n\nPLAN MODE IS ACTIVE: do not change files or run commands that write. Investigate with the read "
@@ -517,9 +566,10 @@ class Agent:
         return VISION_MODEL if (VISION_MODEL and self.history_has_images()) else self.model
 
     def ctx_tokens(self) -> int:
-        n_tools = len(tools.SCHEMAS)
-        if getattr(self, "_tl_key", None) != n_tools:
-            self._tl, self._tl_key = est_tokens(tools.SCHEMAS), n_tools
+        sent = self.tool_schemas()
+        key = tuple(s["name"] for s in sent)
+        if getattr(self, "_tl_key", None) != key:
+            self._tl, self._tl_key = sum(map(schema_tokens, sent)), key
         return est_tokens(self.system_prompt()) + max(0, self._hist_stats()[0] - self._trim_saved() // 4) + self._tl
 
     def _trim_saved(self) -> int:
@@ -535,6 +585,7 @@ class Agent:
     # ------------------------------------------------------------ session
     def reset(self) -> None:
         self.messages, self.todos, self.checkpoints = [], [], []
+        self.mcp_loaded = set()
         self._seen, self._broken = {}, set()
         self.salvaged, self._resume_note = 0, ""
         self.session_id, self.created = session.new_id(), time.time()
@@ -573,6 +624,7 @@ class Agent:
 
     def resume(self, data: dict) -> None:
         self.messages = data["messages"]
+        self.mcp_loaded = set()                        # an MCP tool used again loads its server again (_exec)
         self.session_id, self.created = data["id"], data.get("created", time.time())
         self.todos, self.checkpoints = self._todos_from_history(self.messages), []
         self._seen, self._broken = {}, set()          # files may have changed since: read again before overwriting
@@ -742,9 +794,8 @@ class Agent:
         return msgs
 
     def ctx_breakdown(self) -> dict:
-        """What fills the context, by kind (estimates), for the desktop app's Context panel. The parts add up to
-        ctx_tokens(): the system prompt is split into its skills list, project memory and MCP tool list, and the tool
-        definitions into built-in and MCP ones (per server)."""
+        """What fills the context, by kind (estimates), for the desktop app's Context panel. The parts (except
+        mcp_deferred, which is NOT sent) add up to ctx_tokens(). The *_items lists are what each part opens into."""
         from . import mcp as _mcp
         sys_t = est_tokens(self.system_prompt())
         sk = skills.prompt_section()
@@ -752,24 +803,52 @@ class Agent:
         mem_t = est_tokens("\n\n# Project memory\n" + self.memory_text) if self.memory_text else 0
         inv = _mcp.inventory()
         inv_t = est_tokens(inv) if inv else 0
-        key = len(tools.SCHEMAS)
-        if getattr(self, "_tb_key", None) != key:            # tool schemas change only when MCP servers come and go
-            builtin, servers = 0, {}
-            for s in tools.SCHEMAS:
-                name = str(s.get("name", ""))
-                if name.startswith("mcp__"):
-                    srv = name.split("__")[1] if name.count("__") >= 2 else "mcp"
-                    d = servers.setdefault(srv, {"name": srv, "tools": 0, "tokens": 0})
-                    d["tools"] += 1
-                    d["tokens"] += est_tokens(s)
-                else:
-                    builtin += est_tokens(s)
-            self._tb, self._tb_key = (builtin, sorted(servers.values(), key=lambda d: -d["tokens"])), key
-        builtin, servers = self._tb
-        return {"messages": self._hist_stats()[0], "system_tools": builtin,
-                "mcp_tools": sum(d["tokens"] for d in servers) + inv_t, "skills": skills_t, "memory": mem_t,
-                "system_prompt": max(0, sys_t - skills_t - mem_t - inv_t),
-                "mcp_servers": [dict(d) for d in servers], "window": self.model_context(),
+        prompt_t = max(0, sys_t - skills_t - mem_t - inv_t)
+
+        sent = {s["name"] for s in self.tool_schemas()}
+        builtin, per = [], {}
+        for s in tools.SCHEMAS:
+            name = str(s.get("name", ""))
+            srv = _mcp.server_of(name) if name.startswith("mcp__") else None
+            if srv:
+                per.setdefault(srv, []).append({"name": name.split("__", 2)[-1], "tokens": schema_tokens(s),
+                                                "loaded": name in sent})
+            elif name in sent:
+                builtin.append({"name": name, "tokens": schema_tokens(s)})
+        servers = []
+        for s in list(_mcp.SERVERS.values()):
+            items = sorted(per.get(s.name, []), key=lambda d: -d["tokens"])
+            used = sum(d["tokens"] for d in items if d["loaded"])
+            servers.append({"name": s.name, "tools": len(items), "tokens": used,
+                            "deferred": sum(d["tokens"] for d in items) - used,
+                            "mode": _mcp.mode_of(s.name), "loaded": used > 0, "status": s.status, "items": items})
+        servers.sort(key=lambda d: (-(d["tokens"] + d["deferred"]), d["name"]))
+
+        prompt_items = [{"name": n, "tokens": est_tokens(t)} for n, t in (
+            ("Base instructions", BASE_SYSTEM.format(cwd=os.getcwd(), platform=tools.PLATFORM_NOTE)),
+            ("Tool guide", TOOL_GUIDE), ("Diagram rules (draw.io)", DRAWIO_STYLE), ("Persona", persona.section()),
+            ("Workspace snapshot", getattr(self, "workspace", ""))) if t]
+        rest = prompt_t - sum(d["tokens"] for d in prompt_items)
+        if rest > 0:
+            prompt_items.append({"name": "Answer style, date, language", "tokens": rest})
+        skill_items = [{"name": line[2:].split(":", 1)[0], "tokens": est_tokens(line)}
+                       for line in (sk or "").splitlines() if line.startswith("- ") and ":" in line]
+        memory_items = []
+        for f in self.memory_files:
+            try:
+                memory_items.append({"name": str(f), "tokens": os.path.getsize(f) // 4 + 1})
+            except OSError:
+                pass
+
+        def biggest(items):
+            return sorted(items, key=lambda d: -d["tokens"])
+
+        return {"messages": self._hist_stats()[0], "system_tools": sum(d["tokens"] for d in builtin),
+                "mcp_tools": sum(d["tokens"] for d in servers), "mcp_instructions": inv_t,
+                "mcp_deferred": sum(d["deferred"] for d in servers), "skills": skills_t, "memory": mem_t,
+                "system_prompt": prompt_t, "mcp_servers": servers, "tool_items": biggest(builtin),
+                "skill_items": biggest(skill_items), "memory_items": memory_items,
+                "prompt_items": biggest(prompt_items), "window": self.model_context(),
                 "compact_default": self.effort.compact_at}
 
     def out_limit(self) -> int:
@@ -892,6 +971,11 @@ class Agent:
     def _exec(self, name: str, args: dict) -> str:
         if name not in tools.TOOLS:
             return f"ERROR: tool '{name}' not found"
+        if name.startswith("mcp__"):             # called without load_mcp: keep its definitions in the list from now on
+            from . import mcp as _mcp
+            srv = _mcp.server_of(name)
+            if srv:
+                self.mcp_loaded.add(srv)
         decision, reason = self.policy.check(name, args)
         if decision == "deny":
             ui.denied(self.console, name, reason)
@@ -1009,6 +1093,7 @@ class Agent:
             srv = _mcp.SERVERS.get("context7")
             if srv is None or srv.status != "ready" or not self._LIB_RE.search(text or ""):
                 return ""
+            self.mcp_loaded.add("context7")      # the reminder names its tools, so they must be in the list
         except Exception:
             return ""
         return ("\n\n[system reminder] This request involves an external library/framework. BEFORE writing any code, "
@@ -1048,6 +1133,7 @@ class Agent:
                 wait = 1800 if intent == "bye" else 420
                 self._quiet_until = self._user_at + wait
                 self._user_at += wait
+        web.reset_budget()                       # the search budget is per task
         try:
             self._await_mcp()
             self._run_turn(user_text, images)
@@ -1396,13 +1482,25 @@ class Agent:
         self._resume_note = "user" if by_user else "provider"
 
     # ------------------------------------------------------------ util loop
+    ROUND_WAIT = 10                            # seconds before carrying on past an effort's round limit
+
     def _round_gate(self, rounds: int) -> bool:
-        """False when the effort round limit is reached."""
-        if rounds >= self.effort.max_rounds:
+        """False when the turn has to stop. Below max effort, reaching the effort's round limit only pauses: a
+        countdown (Stop / Ctrl+C ends the turn there), then on by itself, up to max effort's own limit, which still
+        stops a runaway loop."""
+        step, ceiling = self.effort.max_rounds, LEVELS["max"].max_rounds
+        if rounds >= ceiling:
             self.console.print(Panel(
-                tr_("Stopped: reached the limit of {0} rounds for effort [bold]{1}[/]. Type 'continue' or raise it with /effort high.", self.effort.max_rounds, self.effort.name),
+                tr_("Stopped: reached the limit of {0} rounds for effort [bold]{1}[/]. Type 'continue' or raise it with /effort high.", rounds, self.effort.name),
                 border_style=WARN, title_align="left", title=tr_('[bold]effort limit[/]')))
             return False
+        if rounds and rounds % step == 0:
+            self.console.print(tr_('[{MUTED}]effort limit ({0} rounds, {1}): continuing automatically[/]', rounds, self.effort.name, MUTED=MUTED))
+            waiting = lambda s: tr_('[{MUTED}]effort limit: waiting {0}s before continuing[/]', s, MUTED=MUTED)
+            with self.console.status(waiting(self.ROUND_WAIT), spinner="dots") as status:
+                for left in range(self.ROUND_WAIT, 0, -1):
+                    status.update(waiting(left))
+                    self._sleep(1)
         self._maybe_compact()
         return True
 
@@ -1445,6 +1543,14 @@ class Agent:
                 f"{left} If everything is really finished, mark the todos completed with todo_write and just summarise.")
 
     EMPTY_MAX, CUT_MAX = 3, 1
+    _ENDS = re.compile(r"""[.!?:;…。)\]}>"'`*_|~]\s*$""")      # how a finished answer ends
+
+    @classmethod
+    def _cut_short(cls, text: str, out_tokens: int, asked: int) -> bool:
+        """A router that ran out of answer tokens but reported a normal finish: (nearly) all of the tokens asked for
+        were used, and the text stops mid-sentence. Both, so that a long finished answer is left alone."""
+        text = (text or "").rstrip()
+        return bool(text) and asked > 0 and out_tokens >= asked * 0.97 and not cls._ENDS.search(text)
 
     def _silent_end(self, text: str, fin: str | None) -> str | None:
         """The model's reply ended with NOTHING in it (no text, no tool call), or the stream stopped without a finish
@@ -1669,7 +1775,7 @@ class Agent:
     def _anthropic_events(self):
         """Generator for _pump: ("text", str) deltas, then ("final", message)."""
         model = self.active_model
-        kw = claude.request_kwargs(self.system_prompt(), tools.SCHEMAS, self._outgoing(), self.out_limit(),
+        kw = claude.request_kwargs(self.system_prompt(), self.tool_schemas(), self._outgoing(), self.out_limit(),
                                    BASE_URL, int(load_settings().get("thinking") or 0), model=model,
                                    effort=self.effort.name)              # current models: effort = thinking depth
         with self.client.messages.stream(model=model, **kw) as stream:
@@ -1750,6 +1856,7 @@ class Agent:
             if self._usage_opt:
                 kw["stream_options"] = {"include_usage": True}
             try:
+                self._asked_max = kw["max_tokens"]
                 stream = self.client.chat.completions.create(**kw)
             except Exception as e:
                 code = getattr(e, "status_code", 0)
@@ -1772,12 +1879,12 @@ class Agent:
             return stream
 
     def _loop_openai(self) -> None:
-        oa_tools = [{"type": "function", "function": {
-            "name": s["name"], "description": s["description"],
-            "parameters": s["input_schema"]}} for s in tools.SCHEMAS]
         rounds = 0
         while self._round_gate(rounds):
             rounds += 1
+            oa_tools = [{"type": "function", "function": {          # every round: load_mcp may have added tools
+                "name": s["name"], "description": s["description"],
+                "parameters": s["input_schema"]}} for s in self.tool_schemas()]
             view = StreamView(self.console).start()
             content, calls, fin, usage = "", {}, None, None
             thought = ""
@@ -1799,7 +1906,7 @@ class Agent:
                         content += d.content
                         view.text(d.content)
                     for tc in d.tool_calls or []:
-                        c = calls.setdefault(tc.index, {"id": "", "name": "", "args": ""})
+                        c = _call_slot(calls, tc.index, tc.id)
                         if tc.id:
                             c["id"] = tc.id
                         # Gemini (OpenAI-compat) signs each thinking turn; it must be echoed back on the tool call
@@ -1832,6 +1939,8 @@ class Agent:
             self.messages.append(msg)
             if fin:
                 self._fin_seen = True
+            if not calls and exact and self._cut_short(content, usage.completion_tokens, getattr(self, "_asked_max", 0)):
+                fin = "length"                      # the router did not say so: carry on as for any cut-off answer
             self._after_text(content, fin == "length")
             if not calls and is_quota_error(content or ""):
                 raise QuotaExhausted(content)      # -> run_turn cleans the history

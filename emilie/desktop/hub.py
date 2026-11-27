@@ -33,7 +33,9 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from .. import __version__, effort as eff, paths, persona, providers, session, trust
 from ..i18n import t as tr_
-from . import desktop_commands, schema
+from . import desktop_commands, schema, search
+from . import checks, gitops, netkit, notes, projkit, sqlview, testrun
+from . import scripts as pscripts
 
 PKG = Path(__file__).resolve().parent
 WEB = PKG / "web"
@@ -178,9 +180,11 @@ class WorkerProc:
 class Term:
     """A command run from the Terminal pane (output streamed as events)."""
 
-    def __init__(self, hub: "Hub", tid: str, cwd: str, command: str):
+    def __init__(self, hub: "Hub", tid: str, cwd: str, command: str, name: str = ""):
         from .. import tools
-        self.tid, self.command = tid, command
+        self.tid, self.command, self.cwd, self.name = tid, command, cwd, name
+        self.started = time.time()
+        self.tail: list[str] = []                     # the last lines, for a window that was reloaded (/api/term/list)
         cmd = tools._shell_cmd(command) if IS_WIN else ["bash", "-lc", command]
         extra = {"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP} if IS_WIN \
             else {"start_new_session": True}
@@ -189,10 +193,18 @@ class Term:
 
         def pump():
             for line in self.proc.stdout:
-                hub.broadcast({"t": "term", "tid": tid, "line": line.rstrip("\r\n")})
+                line = line.rstrip("\r\n")
+                self.tail.append(line)
+                if len(self.tail) > 1200:
+                    del self.tail[:200]
+                hub.broadcast({"t": "term", "tid": tid, "line": line})
             hub.broadcast({"t": "term_end", "tid": tid, "code": self.proc.wait()})
             hub.terms.pop(tid, None)
         threading.Thread(target=pump, daemon=True).start()
+
+    def describe(self) -> dict:
+        return {"tid": self.tid, "cwd": self.cwd, "command": self.command, "name": self.name,
+                "started": self.started, "lines": self.tail[-800:]}
 
     def kill(self) -> None:
         from .. import tools
@@ -478,6 +490,17 @@ class Hub:
                 t.kill()
             except Exception:
                 pass
+        projkit.stop_all_jobs()
+
+    def own_pids(self) -> dict[int, str]:
+        """Emilie's own processes (the Ports panel must not offer to stop them)."""
+        own = {os.getpid(): "Emilie's background process", os.getppid(): "the Emilie window"}
+        for w in list(self.workers.values()) + ([self.warm] if self.warm else []):
+            try:
+                own[w.proc.pid] = "an Emilie session"
+            except Exception:
+                pass
+        return own
 
     # ------------------------------------------------------------ sessions on disk
     def _meta(self, sid: str) -> dict:
@@ -898,6 +921,13 @@ class Hub:
             else:
                 out.append({"kind": "file", "name": p.name, "path": str(p), "size": p.stat().st_size})
         return {"items": out}
+
+    def fs_search(self, q: dict) -> dict:
+        cwd = q.get("cwd") or ""
+        if not os.path.isdir(cwd):
+            raise ApiError("not a folder", 404)
+        return search.search(cwd, (q.get("q") or "")[:500], case=q.get("case") == "1", word=q.get("word") == "1",
+                             skip=SKIP_DIRS)
 
     # ------------------------------------------------------------ git
     def git_status(self, q: dict) -> dict:
@@ -1512,7 +1542,7 @@ def _term_run(h: Hub, q: dict, b: dict) -> dict:
     if not os.path.isdir(cwd):
         raise ApiError("folder not found")
     tid = f"term{next(h._tids)}"
-    h.terms[tid] = Term(h, tid, cwd, cmd)
+    h.terms[tid] = Term(h, tid, cwd, cmd, str(b.get("name") or "")[:120])
     return {"tid": tid}
 
 
@@ -1540,6 +1570,61 @@ def _mkdir(h: Hub, q: dict, b: dict) -> dict:
         raise ApiError("give a full path")
     p.mkdir(parents=True, exist_ok=True)
     return {"path": str(p)}
+
+
+def _user(fn):
+    """A route whose errors are the user's to read (not a crash): they come back as a plain 400 message."""
+    def call(h: Hub, q: dict, b: dict):
+        try:
+            return fn(h, q, b)
+        except (gitops.GitError, ValueError, OSError) as e:
+            raise ApiError(str(e) or type(e).__name__, 400)
+    return call
+
+
+def _folder(q: dict, b: dict) -> str:
+    cwd = str(b.get("cwd") or q.get("cwd") or "")
+    if not cwd or not os.path.isdir(cwd):
+        raise ApiError("folder not found", 404)
+    return cwd
+
+
+def _job(kind: str, fn):
+    """Start fn(job, cwd, q, b) as a background job; the panel follows it with /api/job."""
+    def call(h: Hub, q: dict, b: dict):
+        cwd = _folder(q, b)
+        return projkit.start_job(kind, cwd, lambda job: fn(job, cwd, q, b))
+    return call
+
+
+def _git_commit(job, cwd: str, q: dict, b: dict) -> dict:
+    return gitops.commit(job, cwd, str(b.get("message") or ""), amend=bool(b.get("amend")), all_=bool(b.get("all")),
+                         push=bool(b.get("push")))
+
+
+def _git_sync(job, cwd: str, q: dict, b: dict) -> dict:
+    return gitops.sync(job, cwd, str(b.get("action") or ""))
+
+
+def _problems_run(job, cwd: str, q: dict, b: dict) -> dict:
+    return checks.run_checks(job, cwd, [str(x) for x in b.get("ids") or []])
+
+
+def _tests_run(job, cwd: str, q: dict, b: dict) -> dict:
+    return testrun.run_tests(job, cwd, str(b.get("suite") or ""), str(b.get("python") or ""),
+                             [str(x) for x in b.get("only") or []])
+
+
+def _ports_kill(h: Hub, q: dict, b: dict) -> dict:
+    try:
+        pid = int(b.get("pid") or 0)
+    except (TypeError, ValueError):
+        raise ApiError("bad pid")
+    return netkit.kill(pid, h.own_pids())
+
+
+def _term_list(h: Hub, q: dict, b: dict) -> dict:
+    return {"terms": [t.describe() for t in list(h.terms.values())]}
 
 
 def _usage(h: Hub, q: dict, b: dict) -> dict:
@@ -1599,6 +1684,7 @@ ROUTES = {
     ("GET", "/api/models"): lambda h, q, b: h.models_list(q.get("refresh") == "1"),
     ("GET", "/api/fs/list"): lambda h, q, b: h.fs_list(q),
     ("GET", "/api/fs/read"): lambda h, q, b: h.fs_read(q),
+    ("GET", "/api/fs/search"): lambda h, q, b: h.fs_search(q),
     ("GET", "/api/fs/complete"): lambda h, q, b: h.fs_complete(q),
     ("GET", "/api/fs/dirs"): lambda h, q, b: h.fs_dirs(q),
     ("POST", "/api/fs/attach"): lambda h, q, b: h.fs_attach(b),
@@ -1610,6 +1696,44 @@ ROUTES = {
     ("POST", "/api/worktree/remove"): lambda h, q, b: h.worktree_remove(b),
     ("POST", "/api/term/run"): _term_run,
     ("POST", "/api/term/kill"): _term_kill,
+    ("GET", "/api/term/list"): _term_list,
+    # the project panels (Git, Scripts, Problems, Tests, HTTP, Ports, Notes, Database) and their background jobs
+    ("GET", "/api/job"): lambda h, q, b: projkit.job_info(q.get("id") or "", int(q.get("since") or 0)),
+    ("POST", "/api/job/stop"): lambda h, q, b: projkit.job_stop(str(b.get("id") or "")),
+    ("GET", "/api/git/scm"): _user(lambda h, q, b: gitops.status(q.get("cwd") or "")),
+    ("GET", "/api/git/file"): _user(lambda h, q, b: gitops.file_diff(_folder(q, b), q.get("path") or "",
+                                                                    q.get("staged") == "1", q.get("untracked") == "1")),
+    ("GET", "/api/git/commit"): _user(lambda h, q, b: gitops.commit_files(_folder(q, b), q.get("hash") or "")),
+    ("POST", "/api/git/init"): _user(lambda h, q, b: gitops.init(_folder(q, b))),
+    ("POST", "/api/git/stage"): _user(lambda h, q, b: gitops.stage(_folder(q, b), b.get("paths"))),
+    ("POST", "/api/git/unstage"): _user(lambda h, q, b: gitops.unstage(_folder(q, b), b.get("paths"))),
+    ("POST", "/api/git/discard"): _user(lambda h, q, b: gitops.discard(_folder(q, b), b.get("paths"), b.get("untracked"))),
+    ("POST", "/api/git/commit"): _job("git-commit", _git_commit),
+    ("POST", "/api/git/sync"): _job("git-sync", _git_sync),
+    ("POST", "/api/git/branch"): _user(lambda h, q, b: gitops.branch(_folder(q, b), str(b.get("action") or ""),
+                                                                    str(b.get("name") or ""), str(b.get("start") or ""),
+                                                                    bool(b.get("force")))),
+    ("POST", "/api/git/stash"): _user(lambda h, q, b: gitops.stash(_folder(q, b), str(b.get("action") or ""),
+                                                                  str(b.get("ref") or ""), str(b.get("message") or ""))),
+    ("GET", "/api/project/scripts"): _user(lambda h, q, b: pscripts.detect(_folder(q, b))),
+    ("POST", "/api/project/commands"): _user(lambda h, q, b: pscripts.save_custom(_folder(q, b), b.get("commands") or [])),
+    ("GET", "/api/problems/checkers"): _user(lambda h, q, b: {"checkers": checks.detect(_folder(q, b))}),
+    ("POST", "/api/problems/run"): _job("problems", _problems_run),
+    ("GET", "/api/tests/suites"): _user(lambda h, q, b: testrun.detect(_folder(q, b), q.get("python") or "")),
+    ("POST", "/api/tests/run"): _job("tests", _tests_run),
+    ("POST", "/api/http/send"): _user(lambda h, q, b: netkit.send(b)),
+    ("GET", "/api/ports"): _user(lambda h, q, b: netkit.ports(h.own_pids())),
+    ("POST", "/api/ports/kill"): _user(_ports_kill),
+    ("GET", "/api/notes"): _user(lambda h, q, b: notes.get(_folder(q, b))),
+    ("POST", "/api/notes"): _user(lambda h, q, b: notes.save(_folder(q, b), str(b.get("text") or ""))),
+    ("GET", "/api/notes/todos"): _user(lambda h, q, b: notes.todos(_folder(q, b))),
+    ("GET", "/api/db/files"): _user(lambda h, q, b: sqlview.files(_folder(q, b))),
+    ("GET", "/api/db/tables"): _user(lambda h, q, b: sqlview.tables(q.get("path") or "")),
+    ("GET", "/api/db/rows"): _user(lambda h, q, b: sqlview.browse(q.get("path") or "", q.get("table") or "",
+                                                                 int(q.get("offset") or 0), int(q.get("limit") or 200),
+                                                                 q.get("order") or "", q.get("desc") == "1")),
+    ("POST", "/api/db/query"): _user(lambda h, q, b: sqlview.query(str(b.get("path") or ""), str(b.get("sql") or ""),
+                                                                  bool(b.get("write")))),
     ("GET", "/api/persona"): lambda h, q, b: h.persona_info(),
     ("POST", "/api/persona"): lambda h, q, b: h.set_persona(b),
     ("GET", "/api/mcp/config"): lambda h, q, b: h.mcp_config(q),

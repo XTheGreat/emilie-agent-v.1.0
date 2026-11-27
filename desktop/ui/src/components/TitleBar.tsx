@@ -6,8 +6,8 @@ import { useStore, useLiveOnScreen, type PaneKind } from "@/lib/store";
 import { get as apiGet, post } from "@/lib/api";
 import { bridge, isElectron, isMac, openPath } from "@/lib/desktop";
 import { cn } from "@/lib/util";
-import { ChatBubble, ChevD, ChevL, ChevR, CodeBrackets, DiffBox, Dots, FolderSm, GlobeSm, ListIcon, ListTodo, MenuLines, Rewind, Prompt, SidebarToggle } from "./icons";
-import { Menu, MenuContent, MenuItem, MenuSep, MenuTrigger, Tip } from "./ui";
+import { Activity, AlertCircle, BranchSm, ChatBubble, ChevD, ChevL, ChevR, CodeBrackets, Database, DiffBox, Dots, Flask, FolderSm, GlobeSm, ListIcon, ListTodo, MenuLines, PanelsPlus, Play, Port, Rewind, Prompt, SearchSm, SendIcon, SidebarToggle, StickyNote } from "./icons";
+import { Menu, MenuContent, MenuItem, MenuLabel, MenuSep, MenuTrigger, Tip } from "./ui";
 
 export const TITLEBAR_H = 27;
 
@@ -87,8 +87,11 @@ export function TitleBar({ sidebarW, envDockable, envOpen }: { sidebarW: number;
         {live && <PaneBtn kind="diff" tip="Changes" active={isOpen("diff")}><DiffBox /></PaneBtn>}
         <PaneBtn kind="browser" tip="Browser" active={isOpen("browser")}><GlobeSm /></PaneBtn>
         <PaneBtn kind="files" tip="Files  Ctrl+Shift+E" active={isOpen("files")}><FolderSm /></PaneBtn>
+        <PaneBtn kind="search" tip="Search in files  Ctrl+Shift+F" active={isOpen("search")}><SearchSm size={13} /></PaneBtn>
         {live && <PaneBtn kind="tasks" tip="Tasks: background processes and sub-agents" active={isOpen("tasks")}><ListTodo size={13} /></PaneBtn>}
         {live && <PaneBtn kind="checkpoints" tip="Checkpoints: what each turn changed, and going back" active={isOpen("checkpoints")}><Rewind size={13} /></PaneBtn>}
+        {live && <PaneBtn kind="activity" tip="Activity: every step the agent ran" active={isOpen("activity")}><Activity size={13} /></PaneBtn>}
+        <PanelsMenu isOpen={isOpen} />
         {live && <MoreMenu />}
         {isElectron && !isMac && <WindowControls />}
       </div>
@@ -201,6 +204,50 @@ function ZoomBadge() {
         {pct}%
       </button>
     </Tip>
+  );
+}
+
+/** The project panels, in one menu so the title bar stays as quiet as Claude Code's. */
+const MORE_PANELS: { group: string; items: { kind: PaneKind; label: string; icon: React.ReactNode; keys?: string }[] }[] = [
+  { group: "Project", items: [
+    { kind: "git", label: "Git", icon: <BranchSm />, keys: "Ctrl+Shift+G" },
+    { kind: "problems", label: "Problems", icon: <AlertCircle />, keys: "Ctrl+Shift+M" },
+    { kind: "tests", label: "Tests", icon: <Flask />, keys: "Ctrl+Shift+U" },
+    { kind: "scripts", label: "Scripts", icon: <Play />, keys: "Ctrl+Shift+Y" },
+  ] },
+  { group: "Tools", items: [
+    { kind: "http", label: "HTTP requests", icon: <SendIcon /> },
+    { kind: "ports", label: "Ports", icon: <Port /> },
+    { kind: "db", label: "Database", icon: <Database /> },
+    { kind: "notes", label: "Notes and TODOs", icon: <StickyNote /> },
+  ] },
+];
+
+function PanelsMenu({ isOpen }: { isOpen: (k: string) => boolean }) {
+  const setPane = useStore((s) => s.setPane);
+  const any = MORE_PANELS.some((g) => g.items.some((i) => isOpen(i.kind)));
+  return (
+    <Menu>
+      <Tip content="More panels: Git, Problems, Tests, Scripts, HTTP, Ports, Database, Notes">
+        <MenuTrigger asChild>
+          <button aria-label="More panels"
+            className={cn("no-drag flex h-[22px] w-[23px] shrink-0 items-center justify-center rounded-[5px] text-text-100 hover:bg-hover data-[state=open]:bg-hover", any && "bg-active")}>
+            <PanelsPlus size={13} />
+          </button>
+        </MenuTrigger>
+      </Tip>
+      <MenuContent align="end" className="min-w-[230px]">
+        {MORE_PANELS.map((g, gi) => (
+          <div key={g.group}>
+            {gi > 0 && <MenuSep />}
+            <MenuLabel>{g.group}</MenuLabel>
+            {g.items.map((i) => (
+              <MenuItem key={i.kind} icon={i.icon} shortcut={i.keys} checked={isOpen(i.kind)} onSelect={() => setPane(i.kind)}>{i.label}</MenuItem>
+            ))}
+          </div>
+        ))}
+      </MenuContent>
+    </Menu>
   );
 }
 

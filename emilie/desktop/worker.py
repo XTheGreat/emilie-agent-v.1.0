@@ -61,10 +61,11 @@ def nid(prefix: str) -> str:
 
 
 def _voice_phase(p: str) -> None:
-    emit("voice_phase", phase=p)
+    emit("voice_phase", phase=p, clip_expected=p == "speaking")
 
 
 voice.VOICE.on_phase = _voice_phase        # the page shows what the voice is doing (making it / speaking)
+voice.VOICE.on_clip = lambda levels, interval, start: emit("voice_clip", levels=levels, interval_ms=interval, started_at=start)
 
 
 def emit(t: str, **kw) -> None:
@@ -154,7 +155,7 @@ def draft_activity(name: str, args: str) -> str:
         return "Searching the project…"
     if name == "web_search":
         return "Searching the web…"
-    if name == "web_fetch":
+    if name in ("web_fetch", "read_page"):
         return "Fetching a page…"
     if name == "docx_create":
         return f"Writing {base or 'a document'}…"
@@ -458,6 +459,7 @@ class Desk:
         self.stream_text, self.stream_id = "", None
         self.extras: list = []                 # [message count when shown, item]: what agent.messages does not keep
         self.aliases: dict = {}                # message index -> the /command the user typed for it
+        self.times: dict = {}                  # message index -> when you sent it (ms): the history has no times
         self.title = ""
         self.known_sid = None
         self.turn_t0 = 0.0
@@ -666,6 +668,8 @@ class Desk:
             self._status_due = time.time() + 0.25
 
     def _ticker(self) -> None:
+        from .. import mcp
+        seen: tuple = ()
         while True:
             time.sleep(0.05)
             try:
@@ -675,6 +679,10 @@ class Desk:
                     if time.time() - self._last_progress > 0.5:
                         self._last_progress = time.time()
                         emit("progress", tokens=int(v.tokens), secs=round(time.time() - v.t0, 1))
+                servers = tuple((s.name, s.status) for s in list(mcp.SERVERS.values()))
+                if servers != seen:                   # a server finished starting: the Context panel is out of date
+                    seen = servers
+                    self.status_soon()
                 if self._status_due and time.time() >= self._status_due:
                     self.status_now()
             except Exception as e:
@@ -711,6 +719,9 @@ class Desk:
             extras = sorted(self.extras, key=lambda e: e[0])
             aliases = dict(self.aliases)
         items = convert.items_from_messages(msgs, aliases, live=self.busy)
+        for it in items:
+            if it["kind"] == "user" and str(it["mi"]) in self.times:
+                it["at"] = self.times[str(it["mi"])]
         out, ei = [], 0
         for it in items:
             while ei < len(extras) and extras[ei][0] <= it["mi"]:
@@ -740,6 +751,7 @@ class Desk:
             data = {}
         self.title = str(data.get("title") or "")
         self.aliases = data.get("aliases") if isinstance(data.get("aliases"), dict) else {}
+        self.times = data.get("times") if isinstance(data.get("times"), dict) else {}
         self.extras = data.get("extras") if isinstance(data.get("extras"), list) else []
         seen: set = set()                        # saved by an older version: the same id twice (see nid)
         for e in self.extras:
@@ -764,6 +776,7 @@ class Desk:
                 cut += 1
             extras = [e for e in self.extras if e[0] <= cut]
             aliases = {k: v for k, v in self.aliases.items() if str(k).isdigit() and int(k) < cut}
+            times = {k: v for k, v in self.times.items() if int(k) < cut}
             title = self.title
         if not msgs[:cut]:
             raise ValueError("there is nothing to fork yet")
@@ -772,7 +785,7 @@ class Desk:
         new_title = f"{title} (fork)" if title else ""
         try:
             META_DIR.mkdir(parents=True, exist_ok=True)
-            meta = {"title": new_title, "cwd": self.cwd, "aliases": aliases, "extras": extras}
+            meta = {"title": new_title, "cwd": self.cwd, "aliases": aliases, "times": times, "extras": extras}
             (META_DIR / f"{sid}.json").write_text(json.dumps(meta, ensure_ascii=False, default=str), encoding="utf-8")
         except OSError as e:
             log(f"fork meta: {e}")
@@ -787,7 +800,8 @@ class Desk:
             p = self._meta_path(a.session_id)
             tmp = p.with_suffix(".tmp")
             with self.lock:
-                data = {"title": self.title, "cwd": self.cwd, "aliases": self.aliases, "extras": self.extras[-200:]}
+                data = {"title": self.title, "cwd": self.cwd, "aliases": self.aliases, "times": self.times,
+                        "extras": self.extras[-200:]}
             tmp.write_text(json.dumps(data, ensure_ascii=False, default=str), encoding="utf-8")
             tmp.replace(p)
         except OSError as e:
@@ -800,7 +814,7 @@ class Desk:
             return
         old, self.known_sid = self.known_sid, a.session_id
         with self.lock:
-            self.extras, self.aliases, self.title = [], {}, ""
+            self.extras, self.aliases, self.times, self.title = [], {}, {}, ""
         if a.messages:
             self.load_meta()
         emit("session_changed", old=old, new=a.session_id)
@@ -924,7 +938,8 @@ class Desk:
         is_cmd = raw.startswith(("/", "!", "# "))
         _clean, files, _c = convert.clean_user_text(sub.text)
         user_item = {"kind": "user", "cid": cid, "text": raw if is_cmd else _clean or raw, "files": files,
-                     "images": [], "n_images": len(sub.images), "spoken": bool(cmd.get("spoken")), "command": None}
+                     "images": [], "n_images": len(sub.images), "spoken": bool(cmd.get("spoken")), "command": None,
+                     "at": int(time.time() * 1000)}
         if raw.startswith("/") and not files and not sub.images:
             user_item.setdefault("id", nid("x"))
             self.quiet = {"user": user_item, "items": []}          # held until we know whether it is a quiet command
@@ -961,6 +976,13 @@ class Desk:
                     if a._is_plain_user(a.messages[i]):
                         self.aliases[str(i)] = raw
                         break
+            if len(a.messages) < n0:               # the history was cut or compacted: forget times that moved
+                keep = len(a.messages) if raw.startswith("/rewind") else 0
+                self.times = {k: v for k, v in self.times.items() if int(k) < keep}
+            for i in range(n0, len(a.messages)):
+                if a._is_plain_user(a.messages[i]):
+                    self.times[str(i)] = user_item["at"]
+                    break
             if len(a.messages) < n0:               # /rewind or /compact moved the history: drop notes past its end
                 with self.lock:
                     self.extras = [e for e in self.extras if e[0] <= len(a.messages)]
@@ -1169,6 +1191,9 @@ class Desk:
             key = cmd.get("key")
             if key == "effort":
                 self.agent.set_effort(eff.load_effort())
+            elif key == "mcp_modes":
+                from .. import mcp
+                mcp.apply_modes(self.cwd)
             elif key == "ui_lang":
                 i18n.set_lang(str(eff.load_settings().get("ui_lang", "en")), save=False)
             self.status_soon()

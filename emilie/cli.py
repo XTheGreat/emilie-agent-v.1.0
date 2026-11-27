@@ -114,8 +114,8 @@ def _show_effort(console: Console, agent: Agent) -> None:
 
 
 def _context(console: Console, agent: Agent) -> None:
-    from .agent import est_tokens
-    sysn, hist, tl = est_tokens(agent.system_prompt()), est_tokens(agent.messages), est_tokens(tools.SCHEMAS)
+    from .agent import est_tokens, schema_tokens
+    sysn, hist, tl = est_tokens(agent.system_prompt()), est_tokens(agent.messages), sum(map(schema_tokens, agent.tool_schemas()))
     total, limit = sysn + hist + tl, agent.compact_limit()
     t = Table.grid(padding=(0, 2))
     t.add_row(tr_('system + memory'), f"~{_k(sysn)}")

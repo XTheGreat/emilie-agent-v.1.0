@@ -132,6 +132,51 @@ The terminal version's prompt is not changed.
 - **Emilie's icon size**: `/logo size <12-80|auto>` (the terminal's command) or Settings → Appearance → Icon size;
   about 3.2px per step on the New session screen (26 ≈ the default 84px). Any setting a /command changes reaches the
   window at once: the worker announces it (`save_and_tell` in `worker.py`).
+- **Activity panel** (`ActivityPane.tsx`): every tool run of the session, newest first, filtered by commands, edits or
+  failures; open one for its input and output, copy them or put them in the message.
+- **Search panel** (`SearchPane.tsx`, `search.py`, Ctrl+Shift+F): plain text in every file of the project (match case,
+  whole word), grouped by file. A click opens the file at that line; `@` on a file mentions it in the message, `@` on a
+  line puts that line in. In a git repository ignored files are left out; files over 1 MB and binary files are skipped,
+  and at most 600 lines are shown (50 per file).
+- **Project panels** (the title bar's panels button, `PanelsMenu` in `TitleBar.tsx`; they work in a session and on the
+  New session page, on the session's folder). Each is a panel like the others (dock it anywhere, expand, close), keeps
+  what it showed per folder while the app runs, and hands work to Emilie with one click ("Fix with Emilie", "Ask
+  Emilie": sent to the session on screen, or put in the message box when there is none; `askEmilie` in `PaneKit.tsx`).
+  Long commands run as background jobs on the hub (`projkit.py`, `/api/job`): the panel shows their output as it comes
+  and can stop them. Sub-projects are found up to two folders down (a `desktop/package.json` next to a root
+  `pyproject.toml`), and each project's own tools are used (its virtualenv, its `node_modules/.bin`).
+  - **Git** (`GitPane.tsx`, `gitops.py`, Ctrl+Shift+G): branch menu (switch, create, delete, check out a remote
+    branch), fetch / pull / push (publishes a branch with no upstream), the commit box (Commit, or Commit all when
+    nothing is staged; Commit and push; Amend; Commit with Emilie = `/commit`), staged and unstaged files with their
+    diffs (stage, unstage, discard: asks first; only files git calls untracked are ever deleted), merge conflicts,
+    stashes, and the history: a commit's message and files, "Show diff" opens it in the Changes panel (`diffGo`).
+    `/review` and `/pr` are in its ··· menu. No repository: "Initialize repository".
+  - **Scripts** (`ScriptsPane.tsx`, `scripts.py`, Ctrl+Shift+Y): package.json scripts (with the project's package
+    manager), Makefile targets (`## description`), justfile recipes, Taskfile, pyproject task runners (poe, taskipy,
+    pdm, hatch) and entry points, Django's manage.py, cargo, go, Docker Compose, deno.json, composer.json and
+    `.claude/launch.json`, plus commands you save for the project (`~/.emilie/desktop/projects.json`). A run streams
+    its output (the hub's `Term`, also listed by `/api/term/list` after a reload); an address a dev server prints
+    opens in the Browser panel; a failed run has "Fix with Emilie".
+  - **Problems** (`ProblemsPane.tsx`, `checks.py`, Ctrl+Shift+M): TypeScript (`tsc --noEmit`, or `-b` for a tsconfig
+    with only references), ESLint, Ruff, mypy, Pyright, Flake8, cargo check, go vet, and a built-in Python syntax
+    check that needs nothing installed. Each tool's report is read into one list grouped by file; a click opens the
+    file at the line. Chips choose which checkers run (remembered per folder).
+  - **Tests** (`TestsPane.tsx`, `testrun.py`, Ctrl+Shift+U): pytest (JUnit XML report), unittest (its -v lines),
+    Vitest and Jest (their JSON reports), go test (-json), cargo test, or a plain package.json test script. Failed
+    tests first with why; run all, the failed ones, a file or one test (re-runs update the last full list). For
+    Python the interpreter is chosen in the panel (project virtualenv, the one on PATH, or Emilie's own).
+  - **HTTP** (`HttpPane.tsx`, `netkit.send`): method, address, params, headers, body (JSON / text / form); sent by the
+    hub, so there is no CORS and local servers answer; status, time, size, headers, JSON pretty-printed, HTML preview,
+    images; history per folder (localStorage); copy as curl; attach request and answer to the message.
+  - **Ports** (`PortsPane.tsx`, `netkit.ports`): what listens on TCP ports (netstat + tasklist on Windows, lsof or ss
+    elsewhere) and which program; by default only dev servers, databases and Emilie's own processes ("All" shows the
+    rest). Open in the Browser panel, or stop the program (asks first; Emilie's own processes cannot be stopped).
+  - **Notes** (`NotesPane.tsx`, `notes.py`): a Markdown scratchpad per project, saved as you type in
+    `~/.emilie/desktop/notes` (outside the project, so never committed), and the TODO / FIXME / HACK / XXX / BUG
+    comments of the project's files.
+  - **Database** (`DatabasePane.tsx`, `sqlview.py`): the project's SQLite files (found by their header), tables and
+    views with row counts, a page of rows (sort by a column), the structure, and an SQL box. Read-only unless "Allow
+    changes" is on, for that statement only; one statement at a time; a query stops after 15 seconds.
 
 Sessions are the CLI's own files (`~/.emilie/sessions`), so a session started in the terminal opens in the app and
 the other way round. The app adds a small file per session in `~/.emilie/desktop/sessions` (title, what you typed
@@ -152,6 +197,8 @@ for `/commands`, command output) and writes its log to `~/.emilie/desktop/deskto
 | `emilie/desktop/schema.py` | the Settings page as data, and the one place settings are validated and saved |
 | `emilie/desktop/convert.py` | saved messages → transcript items (when a session is opened again) |
 | `emilie/desktop/blocks.py` | Rich renderables → JSON blocks |
+| `emilie/desktop/projkit.py` | what the project panels share: commands, the project's own tools, sub-projects, background jobs (`/api/job`) |
+| `emilie/desktop/gitops.py`, `scripts.py`, `checks.py`, `testrun.py`, `netkit.py`, `notes.py`, `sqlview.py` | the Git, Scripts, Problems, Tests, HTTP + Ports, Notes and Database panels (tests: `tests/test_project_panels.py`) |
 
 ## Changing it
 
@@ -186,7 +233,8 @@ them as `bg-bg-100`, `text-text-300`, `border-border-300`, `bg-accent`, …
 
 Enter send · Shift+Enter new line · Esc stop · Shift+Tab ask → trust → plan · `/` commands · `@` files · ↑ last
 message · Ctrl+N new session · Ctrl+K search · Ctrl+, settings · Ctrl+B sidebar · Ctrl+J terminal ·
-Ctrl+Shift+E files · Alt+←/→ back/forward · Ctrl+= / Ctrl+- zoom.
+Ctrl+Shift+E files · Ctrl+Shift+F search in files · Ctrl+Shift+G Git · Ctrl+Shift+M Problems · Ctrl+Shift+U Tests ·
+Ctrl+Shift+Y Scripts · Alt+←/→ back/forward · Ctrl+= / Ctrl+- zoom.
 
 ## Not in the app (terminal only)
 

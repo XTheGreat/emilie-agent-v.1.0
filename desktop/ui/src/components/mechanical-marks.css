@@ -1,0 +1,163 @@
+.workmark.mx-mark {
+  display: block;
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.65;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.mx-mark .mx-shell { fill: color-mix(in srgb, currentColor 15%, var(--bg-000)); }
+.mx-mark .mx-solid { fill: currentColor; stroke: none; }
+
+/* Both ends of the cord stay attached as the pins slide behind the socket face. */
+.mx-connect { --mx-cycle: 2.45s; }
+.mx-plug { animation: mx-mate var(--mx-cycle) ease-in-out infinite; }
+.mx-cord {
+  transform-origin: 1px 16.8px;
+  vector-effect: non-scaling-stroke;
+  animation: mx-feed var(--mx-cycle) ease-in-out infinite;
+}
+.mx-socket { animation: mx-seat var(--mx-cycle) ease-in-out infinite; }
+.mx-energy { color: color-mix(in srgb, var(--warn) 55%, #ed851e); stroke-width: 1.35; }
+.mx-gap-arc, .mx-contact, .mx-discharge, .mx-grain, .mx-socket-led { opacity: 0; }
+.mx-gap-arc { animation: mx-gap var(--mx-cycle) ease-out infinite; }
+.mx-discharge { animation: mx-discharge var(--mx-cycle) ease-out infinite; }
+.mx-contact { animation: mx-contact var(--mx-cycle) ease-out infinite; }
+.mx-contact-lower { animation-delay: 48ms; }
+.mx-grain { fill: currentColor; stroke: none; animation: mx-eject var(--mx-cycle) ease-out infinite; }
+/* The streak skims the cable; the bead clears the socket's outer lip. */
+.mx-streak { --apex: -7.1px, -1.1px; --end: -12px, -.4px; --roll: -8deg; }
+.mx-fleck { --apex: -.9px, -4.8px; --end: -1.7px, -7.6px; --roll: -18deg; animation-delay: 34ms; }
+.mx-bead { --apex: 5.3px, 1.3px; --end: 5.9px, 4.2px; --roll: 0deg; animation-delay: 63ms; }
+.mx-spall { --apex: -2.6px, 4.1px; --end: -5.6px, 8.2px; --roll: -22deg; animation-delay: 48ms; }
+.mx-socket-led { fill: var(--warn); stroke: none; animation: mx-power var(--mx-cycle) ease-out infinite; }
+@keyframes mx-mate {
+  0%, 9%, 100% { transform: translateX(0); }
+  17% { transform: translateX(-1px); }
+  30% { transform: translateX(7.7px); }
+  36%, 66% { transform: translateX(7.2px); }
+  72% { transform: translateX(7.5px); }
+  84% { transform: translateX(-.6px); }
+  91% { transform: translateX(.35px); }
+}
+@keyframes mx-feed {
+  0%, 9%, 100% { transform: scaleX(1); }
+  17% { transform: scaleX(.75); }
+  30% { transform: scaleX(2.925); }
+  36%, 66% { transform: scaleX(2.8); }
+  72% { transform: scaleX(2.875); }
+  84% { transform: scaleX(.85); }
+  91% { transform: scaleX(1.0875); }
+}
+@keyframes mx-seat {
+  0%, 25%, 37%, 100% { transform: translateX(0); }
+  30% { transform: translateX(.7px); }
+}
+@keyframes mx-gap {
+  0%, 20%, 25%, 100% { opacity: 0; }
+  22.5% { opacity: .95; }
+}
+@keyframes mx-contact {
+  0%, 22%, 34%, 100% { opacity: 0; transform: scale(.5); }
+  25% { opacity: 1; transform: scale(1.16); }
+  29% { opacity: .65; transform: scale(.88); }
+}
+@keyframes mx-discharge {
+  0%, 23%, 34%, 100% { opacity: 0; }
+  24% { opacity: .9; transform: scale(.65); }
+  28% { opacity: 1; transform: scale(1); }
+}
+@keyframes mx-eject {
+  0%, 24% { opacity: 0; transform: scale(.3); }
+  26% { opacity: 1; transform: scale(.72); }
+  34% { opacity: 1; transform: translate(var(--apex)) scale(1); }
+  51%, 100% { opacity: 0; transform: translate(var(--end)) rotate(var(--roll)) scale(.32); }
+}
+@keyframes mx-power {
+  0%, 28%, 82%, 100% { opacity: 0; }
+  34%, 72% { opacity: 1; }
+}
+
+/* A closed grip turns the nut by one face. The open jaws travel back on their own. */
+.mx-tool { --mx-cycle: 2.35s; }
+.mx-torque, .mx-nut { transform-origin: 14.4px 5.6px; }
+.mx-torque { animation: mx-turn-tool var(--mx-cycle) ease-in-out infinite; }
+.mx-nut { animation: mx-turn-nut var(--mx-cycle) ease-in-out infinite; }
+.mx-jaw { transform-origin: 14.4px 11.4px; animation: mx-grip var(--mx-cycle) ease-in-out infinite; }
+.mx-jaw-left { --mx-open: -14deg; }
+.mx-jaw-right { --mx-open: 14deg; }
+.mx-torque-ticks { opacity: 0; animation: mx-effort var(--mx-cycle) ease-out infinite; }
+@keyframes mx-turn-tool {
+  0%, 18%, 94%, 100% { transform: rotate(-16deg); }
+  43% { transform: rotate(47deg); }
+  51%, 65% { transform: rotate(44deg); }
+  85% { transform: rotate(-20deg); }
+}
+@keyframes mx-turn-nut {
+  0%, 18% { transform: rotate(0); }
+  43% { transform: rotate(63deg); }
+  51%, 100% { transform: rotate(60deg); }
+}
+@keyframes mx-grip {
+  0%, 6%, 64%, 100% { transform: rotate(var(--mx-open)); }
+  16%, 52% { transform: rotate(0); }
+}
+@keyframes mx-effort {
+  0%, 36%, 55%, 100% { opacity: 0; transform: translate(1px, 1px); }
+  42% { opacity: .85; transform: translate(0, 0); }
+  54% { opacity: 0; transform: translate(-.8px, -.8px); }
+}
+
+.mx-helper { --mx-cycle: 1.9s; }
+.mx-hop { transform-origin: 12px 20px; animation: mx-jump var(--mx-cycle) ease-in-out infinite; }
+.mx-aerial { transform-origin: 12px 9px; animation: mx-flick var(--mx-cycle) ease-in-out infinite; }
+.mx-eyes { transform-origin: 12px 13px; animation: mx-blink var(--mx-cycle) linear infinite; }
+.mx-shadow { opacity: .26; transform-origin: 12px 21.4px; animation: mx-shadow var(--mx-cycle) ease-in-out infinite; }
+.mx-arm-left { transform-origin: 6.9px 14.3px; --mx-lift: 64deg; }
+.mx-arm-right { transform-origin: 17.1px 14.3px; --mx-lift: -74deg; }
+.mx-arm-left, .mx-arm-right { animation: mx-wave var(--mx-cycle) ease-in-out infinite; }
+.mx-landing { opacity: 0; transform-origin: 12px 20px; animation: mx-land var(--mx-cycle) ease-out infinite; }
+@keyframes mx-jump {
+  0%, 9%, 81%, 100% { transform: translateY(0) scale(1); }
+  20% { transform: scale(1.1, .84); }
+  31% { transform: translateY(-2.3px) scale(.96, 1.02); }
+  42% { transform: translateY(-4.2px) rotate(-5deg); }
+  52% { transform: translateY(-3.1px) rotate(1deg); }
+  62% { transform: scale(1.12, .84); }
+  70% { transform: scale(.98, 1.02); }
+}
+@keyframes mx-wave {
+  0%, 20%, 66%, 100% { transform: rotate(0); }
+  35%, 47% { transform: rotate(var(--mx-lift)); }
+}
+@keyframes mx-flick {
+  0%, 16%, 82%, 100% { transform: rotate(0); }
+  35% { transform: rotate(-18deg); }
+  58% { transform: rotate(20deg); }
+  68% { transform: rotate(-9deg); }
+}
+@keyframes mx-blink {
+  0%, 12%, 24%, 100% { transform: scaleY(1); }
+  17%, 20% { transform: scaleY(.18); }
+}
+@keyframes mx-shadow {
+  0%, 22%, 64%, 100% { transform: scaleX(1); opacity: .26; }
+  42% { transform: scaleX(.56); opacity: .13; }
+}
+@keyframes mx-land {
+  0%, 58%, 82%, 100% { transform: scaleX(.7); opacity: 0; }
+  63% { transform: scaleX(.9); opacity: .8; }
+  77% { transform: scaleX(1.2); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mx-mark * { animation: none; }
+  .mx-connect .mx-plug { transform: translateX(4px); }
+  .mx-connect .mx-cord { transform: scaleX(2); }
+  .mx-connect .mx-socket-led { opacity: 1; }
+  .mx-tool .mx-torque { transform: rotate(18deg); }
+  .mx-helper .mx-arm-right { transform: rotate(-48deg); }
+}

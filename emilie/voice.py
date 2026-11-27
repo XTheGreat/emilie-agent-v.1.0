@@ -9,11 +9,14 @@ voice_url, voice_dir, voice_engine, voice_size.
 """
 from . import paths
 import io
+import itertools
 import json
+import math
 import os
 import queue
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 import threading
@@ -103,6 +106,61 @@ def _duration(audio: bytes, text: str) -> float:
         return max(1.0, len(text) / 14.0)
 
 
+def _level_step(rate: int, frames: int) -> int:
+    return max(1, round(rate * .05), (frames + 2399) // 2400)
+
+
+def _visual_level(rms: float) -> float:
+    return round(min(1., 1.6 * rms**.5), 3) if math.isfinite(rms) else 0.
+
+
+def _clip_levels(audio: bytes) -> tuple[list[float], float]:
+    """RMS across all PCM channels, in ~50 ms bins. Cap the size of a single desktop event."""
+    try:
+        with wave.open(io.BytesIO(audio)) as w:
+            width, rate, frames = w.getsampwidth(), w.getframerate(), w.getnframes()
+            # In 24-bit PCM the upper 16 bits are ample for a visual level.
+            fmt, full_scale = {1: ("<B", 128), 2: ("<h", 32768), 3: ("<xh", 32768), 4: ("<i", 2**31)}[width]
+            step = _level_step(rate, frames)
+            levels = []
+            while block := w.readframes(step):
+                samples = struct.iter_unpack(fmt, block)
+                if width == 1:              # 8-bit WAV stores silence at 128; wider samples are signed
+                    energy = sum((v - 128)**2 for (v,) in samples)
+                else:
+                    energy = sum(v * v for (v,) in samples)
+                rms = (energy / (len(block) // width))**.5 / full_scale
+                levels.append(_visual_level(rms))
+            return levels, step * 1000 / rate
+    except Exception:
+        pass
+
+    # Python's wave reader doesn't accept IEEE float WAV, also common in TTS.
+    # Load the app's audio decoder only for WAV variants that need it.
+    if audio[:4] in (b"RIFF", b"RF64") and audio[8:12] == b"WAVE":
+        try:
+            import av
+            import numpy as np
+
+            with av.open(io.BytesIO(audio), format="wav") as source:
+                stream = source.streams.audio[0]
+                rate = stream.codec_context.sample_rate
+                frames = round((stream.duration or 0) * stream.time_base * rate)
+                step = _level_step(rate, frames)
+                bins = av.AudioResampler(format="flt", layout=stream.codec_context.layout, rate=rate, frame_size=step)
+                levels = []
+                for frame in itertools.chain(source.decode(stream), (None,)):  # flush the final partial bin
+                    for block in bins.resample(frame):
+                        if len(levels) >= 2400:  # guard inaccurate duration metadata
+                            return [], 50.
+                        power = np.square(block.to_ndarray(), dtype=np.float64).mean()
+                        levels.append(_visual_level(math.sqrt(power)))
+                return levels, step * 1000 / rate
+        except Exception:
+            pass
+    return [], 50.                          # unsupported audio may still play in the native player
+
+
 class _Item:
     """One voice clip plus the text blocks that go with it. `parts` = [(weight, show_fn)]: the first block is shown
     when the audio starts, the others are paced over the clip's length, so the words follow the voice.
@@ -184,6 +242,7 @@ class Voice:
         self._unshown = 0                   # items whose text is not fully on screen yet
         self._srv_lock = threading.Lock()
         self.on_phase = None                # callable(str): told when the voice goes quiet / replying / speaking
+        self.on_clip = None                 # desktop callback(levels, bin_ms, playback_start_ms), once per clip
         self._ph_last = ""
         self._warm_done = threading.Event()  # set unless a warm-up clip is being generated
         self._warm_done.set()
@@ -485,8 +544,6 @@ class Voice:
                 self._note(tr_('voice: the voice came too late for its text and was skipped'))
             if item.audio:
                 item.start(_duration(item.audio, item.text or ""))      # words follow the voice
-                self.playing = True
-                self._ph()
                 try:
                     self._play(item.audio, item.ep)
                 except Exception as e:
@@ -606,15 +663,66 @@ class Voice:
             else:
                 self._note(tr_('voice: no audio player found (install mpv)'))
                 return
+        on_clip = self.on_clip
+        levels, interval = _clip_levels(audio) if on_clip else ([], 50.)
+
+        def started(elapsed: float = 0.) -> None:
+            if ep != self.epoch:
+                return
+            at = round((time.time() - elapsed) * 1000)
+            self.playing = True
+            self._ph()
+            if on_clip:
+                try:
+                    on_clip(levels, interval, at)
+                except Exception:
+                    pass                    # an unavailable renderer must never interrupt playback
+
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             f.write(audio)
         try:
             if ep != self.epoch:
                 return
-            tail = [f"(New-Object Media.SoundPlayer '{f.name}').PlaySync()"] if cmd[0] == "powershell" else [f.name]
-            self.proc = subprocess.Popen([*cmd, *tail], stdin=subprocess.DEVNULL,
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self.proc.wait()
+            player = cmd[0]
+            env = None
+            marker = "EMILIE_PLAYING"
+            if on_clip and player == "mpv":
+                cmd = [player, "--no-video", "--terminal=yes", "--quiet", "--msg-color=no", f"--term-playing-msg={marker}"]
+            elif on_clip and player == "ffplay":
+                cmd.append("-stats")        # audio clock accounts for process startup and device buffering
+            elif on_clip and player == "aplay":
+                cmd = [player]              # aplay announces the opened stream on stderr
+                env = {**os.environ, "LC_ALL": "C"}
+            if player == "powershell":
+                path = f.name.replace("'", "''")
+                ready = f"$p.Load(); [Console]::Out.WriteLine('{marker}'); " if on_clip else ""
+                cmd.append(f"$ErrorActionPreference='Stop'; $p=New-Object Media.SoundPlayer '{path}'; {ready}$p.PlaySync()")
+            else:
+                cmd.append(f.name)
+            with subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE if on_clip else subprocess.DEVNULL,
+                                  stderr=subprocess.STDOUT if on_clip else subprocess.DEVNULL, env=env) as proc:
+                self.proc = proc
+                if ep != self.epoch:        # stop() may have run while the player process was starting
+                    proc.terminate()
+                elif not on_clip:
+                    started()
+                else:
+                    # ffplay terminates its clock updates with CR; don't wait another frame for a newline.
+                    with io.TextIOWrapper(proc.stdout, encoding="ascii", errors="replace",
+                                          newline="\r" if player == "ffplay" else None) as output:
+                        for line in output:
+                            if self.playing or ep != self.epoch:
+                                continue
+                            if player == "ffplay":
+                                match = re.match(r"\s*(\d+\.\d+) M-A:", line)
+                                if match:
+                                    started(float(match[1]))
+                                elif 0 < len(levels) * interval <= 160 and " M-A:" in line:
+                                    # A clip shorter than the output buffer can finish before the first
+                                    # numeric clock update. The audio output has already opened here.
+                                    started()
+                            elif marker in line or (player == "aplay" and line.startswith("Playing ")):
+                                started()
         finally:
             try:
                 os.unlink(f.name)

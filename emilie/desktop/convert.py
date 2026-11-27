@@ -60,7 +60,8 @@ class _Cap:
 
 
 def is_error(name: str, out: str) -> bool:
-    return out.startswith(("ERROR", "BLOCKED")) or (name == "bash" and out.startswith("exit=") and not out.startswith("exit=0"))
+    return out.startswith(("ERROR", "BLOCKED")) or (name == "bash" and out.startswith("exit=") and not out.startswith("exit=0")) \
+        or (name in ("render_diagram", "render_drawio") and '{"ok": false' in out)
 
 
 def summary(name: str, out: str, dt: float | None = None) -> list[str]:

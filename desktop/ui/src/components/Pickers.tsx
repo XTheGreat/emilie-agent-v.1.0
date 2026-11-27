@@ -5,9 +5,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore, folderName } from "@/lib/store";
 import type { Live } from "@/lib/types";
 import { openPath } from "@/lib/desktop";
+import { get as apiGet } from "@/lib/api";
 import { cn, fmtTokens, prettyModel } from "@/lib/util";
 import type { PickerName } from "@/lib/slash";
-import { Check, ChevD, Eye, FolderOpen, FolderSm, LaptopIcon, ListTodo, Loader, MessageSquare, PlusSm, Refresh, Rewind, SearchSm, Shield, Zap } from "./icons";
+import { Check, ChevD, Eye, FolderOpen, FolderSm, ListTodo, Loader, MessageSquare, Plug, PlusSm, Refresh, Rewind, SearchSm, Shield, Zap } from "./icons";
 import { Menu, MenuContent, MenuItem, MenuLabel, MenuSep, MenuTrigger, Pop, PopContent, PopTrigger, Segmented, Tip, TipBody } from "./ui";
 import { focusComposer } from "./Composer";
 
@@ -32,54 +33,50 @@ export const MODES: Record<string, { label: string; short: string; desc: string;
   plan: { label: "Plan", short: "Plan", desc: "Only reads, then proposes a plan for you to approve", icon: <ListTodo size={13} /> },
 };
 
-/** "This computer ∨": the environment picker, laid out like Claude Code's: a search field, "Local" with this computer
- *  (Emilie's only environment) and the recent project folders, then "+ New environment" (open another folder). */
-export function ComputerChip({ cwd, onPickFolder }: { cwd?: string | null; onPickFolder?: (p: string) => void }) {
-  const folders = useStore((s) => s.folders);
-  const pickFolder = useStore((s) => s.pickFolder);
+const MCP_CHOICES = [
+  { value: "always", label: "Always" },
+  { value: "on_demand", label: "On demand" },
+  { value: "off", label: "Off" },
+];
+
+/** "MCP ∨": which MCP servers the next chat gets, and how (the mcp_modes setting): every tool sent each time,
+ *  loaded only when needed (the default), or not started. */
+export function McpChip({ cwd }: { cwd?: string | null }) {
+  const modes = useStore((s) => s.settings.mcp_modes as Record<string, string> | undefined);
+  const setSetting = useStore((s) => s.setSetting);
   const [open, setOpen] = useState(false);
-  const [q, setQ] = useState("");
-  const input = useRef<HTMLInputElement>(null);
+  const [names, setNames] = useState<string[] | null>(null);
   useEffect(() => {
     if (!open) return;
-    setQ("");
-    const t = setTimeout(() => input.current?.focus(), 30);
-    return () => clearTimeout(t);
-  }, [open]);
-  const ql = q.trim().toLowerCase();
-  const local = folders.filter((f) => f.exists && (!ql || f.name.toLowerCase().includes(ql) || f.path.toLowerCase().includes(ql))).slice(0, 8);
-  const showPc = !ql || "this computer".includes(ql);
+    apiGet("/api/mcp/config", cwd ? { cwd } : {})
+      .then((c: any) => setNames(Object.keys({ ...c.user?.servers, ...c.project?.servers }).sort()))
+      .catch(() => setNames([]));
+  }, [open, cwd]);
   return (
-    <Menu open={open} onOpenChange={setOpen}>
-      <Tip side="top" content="Environment" hidden={open}>
-        <MenuTrigger asChild>
-          <button className={chip}><LaptopIcon size={12} />This computer{chev}</button>
-        </MenuTrigger>
+    <Pop open={open} onOpenChange={setOpen}>
+      <Tip side="top" content="MCP servers" hidden={open}>
+        <PopTrigger asChild>
+          <button className={chip}><Plug size={12} />MCP{chev}</button>
+        </PopTrigger>
       </Tip>
-      <MenuContent align="start" side="top" className="w-[243px] p-0" onCloseAutoFocus={refocus}>
-        <div className="border-b border-[var(--dropdown-sep)] px-[12px]">
-          <input ref={input} value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search environments" spellCheck={false}
-            onKeyDown={(e) => { if (!["Escape", "ArrowDown", "ArrowUp", "Tab"].includes(e.key)) e.stopPropagation(); }}
-            className="h-[31px] w-full bg-transparent text-[12px] text-text-100 outline-none placeholder:text-text-500 selectable" />
-        </div>
-        <div className="max-h-[300px] overflow-y-auto p-[5px]">
-          <MenuLabel>Local</MenuLabel>
-          {showPc && <MenuItem checked checkClass="text-[var(--folder-tint)]" onSelect={() => setOpen(false)}>This computer</MenuItem>}
-          {local.map((f) => (
-            <MenuItem key={f.path} checked={false} onSelect={() => onPickFolder?.(f.path)}>
-              <span title={`Work in ${f.path}`}>{f.name}</span>
-              {cwd && cwd.toLowerCase() === f.path.toLowerCase() && <span className="ml-1.5 text-[10.5px] text-text-500">current folder</span>}
-            </MenuItem>
+      <PopContent side="top" className="w-[300px] p-[10px]" onCloseAutoFocus={refocus}>
+        <div className="mb-[2px] font-medium">MCP servers</div>
+        <p className="mb-[8px] text-[11px] leading-[15px] text-text-400">On demand costs no tokens until Emilie needs the server.</p>
+        <div className="max-h-[280px] overflow-y-auto">
+          {names?.map((n) => (
+            <div key={n} className="flex h-[28px] items-center gap-2">
+              <span className="min-w-0 flex-1 truncate" title={n}>{n}</span>
+              <Segmented value={modes?.[n] || "on_demand"} onChange={(v) => setSetting("mcp_modes", { ...modes, [n]: v })} options={MCP_CHOICES} />
+            </div>
           ))}
-          {!showPc && !local.length && <div className="px-[7px] py-[3px] text-[11.5px] text-text-500">Nothing matches “{q.trim()}”</div>}
-          <MenuSep />
-          <MenuItem icon={<PlusSm />} onSelect={async () => {
-            const p = await pickFolder("Choose a folder");
-            if (p) onPickFolder?.(p);
-          }}>New environment</MenuItem>
+          {names && !names.length && <div className="text-[11.5px] text-text-500">No MCP servers yet.</div>}
         </div>
-      </MenuContent>
-    </Menu>
+        <button className="mt-[8px] flex items-center gap-[6px] text-[11.5px] text-text-300 hover:text-text-000"
+          onClick={() => { setOpen(false); useStore.setState({ settingsOpen: "customize" }); }}>
+          <PlusSm />Add or remove servers
+        </button>
+      </PopContent>
+    </Pop>
   );
 }
 

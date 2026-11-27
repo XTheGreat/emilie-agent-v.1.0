@@ -202,7 +202,8 @@ const KEYS: [string, string][] = [
   ["Enter", "Send"], ["Shift+Enter", "New line"], ["Esc", "Stop Emilie"], ["Shift+Tab", "Switch mode: ask → trust → plan"],
   ["/", "Commands and skills"], ["@", "Mention a file"], ["↑", "Previous message"], ["Ctrl+N", "New session"],
   ["Ctrl+K", "Search sessions"], ["Ctrl+,", "Settings"], ["Ctrl+B", "Toggle the sidebar"], ["Ctrl+J", "Terminal"],
-  ["Ctrl+Shift+E", "Files"], ["Ctrl+Shift+I", "Model and effort"], ["Alt+← / Alt+→", "Back / forward"],
+  ["Ctrl+Shift+E", "Files"], ["Ctrl+Shift+F", "Search in files"], ["Ctrl+Shift+G", "Git"], ["Ctrl+Shift+M", "Problems"],
+  ["Ctrl+Shift+U", "Tests"], ["Ctrl+Shift+Y", "Scripts"], ["Ctrl+Shift+I", "Model and effort"], ["Alt+← / Alt+→", "Back / forward"],
   ["Alt+V", "Video call: start / end"], ["Ctrl+= / Ctrl+-", "Zoom"], ["F12", "Developer tools (desktop app)"],
 ];
 

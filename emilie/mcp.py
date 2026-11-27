@@ -24,6 +24,7 @@ from pathlib import Path
 
 from .i18n import t as tr_
 from . import tools
+from .effort import load_settings
 
 PROTOCOL = "2024-11-05"            # stdio
 HTTP_PROTOCOL = "2025-03-26"       # Streamable HTTP
@@ -253,6 +254,41 @@ class Server:
 
 SERVERS: dict[str, Server] = {}
 
+# How each server's tools reach the model (the "mcp_modes" setting, {server: mode}):
+#   always    - every tool definition is sent with every request
+#   on_demand - (default) only the server's name is listed; the load_mcp tool adds its tools to the conversation
+#   off       - the server is not started at all
+MODES = ("always", "on_demand", "off")
+
+
+def mode_of(name: str) -> str:
+    m = (load_settings().get("mcp_modes") or {}).get(name)
+    return m if m in MODES else "on_demand"
+
+
+def server_of(tool_name: str) -> str | None:
+    return next((s.name for s in list(SERVERS.values()) if tool_name in s.tool_names), None)
+
+
+def visible(schemas: list[dict], loaded: set[str]) -> list[dict]:
+    """The tool definitions to send: an on-demand server's tools only once it is loaded."""
+    servers = list(SERVERS.values())
+    hidden = {t for s in servers if s.name not in loaded and mode_of(s.name) != "always" for t in s.tool_names}
+    if not any(s.status != "off" and mode_of(s.name) == "on_demand" for s in servers):
+        hidden.add("load_mcp")                                   # nothing to load: do not offer the tool
+    return [x for x in schemas if x["name"] not in hidden]
+
+
+def apply_modes(cwd: str) -> None:
+    """After the setting changed: stop the servers that are now off, start the ones that are on again."""
+    for name, s in list(SERVERS.items()):
+        off = mode_of(name) == "off"
+        if off and s.status != "off":
+            s.stop()
+            s.status, s.error = "off", ""
+        elif not off and s.status == "off":
+            reconnect(name, cwd)
+
 _IMG_EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}
 
 
@@ -296,23 +332,30 @@ def wait_ready(timeout: float = 30.0) -> list[str]:
 
 
 def inventory() -> str:
-    """For the system prompt, every request: the MCP servers connected right now and their exact tool names, so the
-    model knows what it can do (it once told the user it had no browser while the browser server was connected)."""
-    if not SERVERS:
+    """For the system prompt, every request: the MCP servers connected right now, so the model knows what it can do (it
+    once told the user it had no browser while the browser server was connected). An on-demand server gets one line
+    that does not change when it is loaded, so the cached start of the request stays the same."""
+    active = [s for s in list(SERVERS.values()) if s.status != "off"]
+    if not active:
         return ""
-    lines = ["", "", "# MCP tools connected right now",
-             "These are real tools in your tool list; call them by these exact names. Check this list before telling the "
-             "user you cannot do something (open or test a web page, take a screenshot, look up docs, remember things)."]
-    for s in SERVERS.values():
+    lines = ["", "", "# MCP servers connected right now",
+             "Check this list before telling the user you cannot do something (open or test a web page, take a "
+             "screenshot, look up docs, remember things). For a server marked 'on demand', first call load_mcp with "
+             "its name: its tools (mcp__<server>__<tool>) are then in your tool list. Load only what the task needs."]
+    for s in active:
         purpose = PURPOSE.get(s.name.lower(), "")
         head = f"- {s.name}" + (f" ({purpose})" if purpose else "")
-        if s.status == "ready" and s.tool_names:
+        if s.status == "failed":
+            lines.append(f"{head}: failed to start ({(s.error or 'unknown error')[:140]}). If the user needs it, say so.")
+        elif mode_of(s.name) == "on_demand":
+            if not purpose and s.tool_names:                     # an unknown server: a few tool names say what it does
+                head += " (tools such as " + ", ".join(t.split("__")[-1] for t in s.tool_names[:4]) + ")"
+            lines.append(f"{head}: on demand")
+        elif s.status == "ready" and s.tool_names:
             names = ", ".join(s.tool_names[:12]) + (f" … ({len(s.tool_names)} tools in all)" if len(s.tool_names) > 12 else "")
             lines.append(f"{head}: {names}")
         elif s.status == "starting":
             lines.append(f"{head}: still starting, its tools appear in a moment. Do not tell the user it is missing.")
-        elif s.status == "failed":
-            lines.append(f"{head}: failed to start ({(s.error or 'unknown error')[:140]}). If the user needs it, say so.")
     return "\n".join(lines)
 
 
@@ -343,7 +386,14 @@ def start_all(cwd: str) -> None:
         else:
             continue
         SERVERS[name] = srv
-        threading.Thread(target=srv.start, daemon=True).start()
+        _launch(srv)
+
+
+def _launch(srv: Server) -> None:
+    if mode_of(srv.name) == "off":
+        srv.status = "off"
+        return
+    threading.Thread(target=srv.start, daemon=True).start()
 
 
 def reconnect(name: str, cwd: str) -> bool:
@@ -361,7 +411,7 @@ def reconnect(name: str, cwd: str) -> bool:
     else:
         return False
     SERVERS[name] = srv
-    threading.Thread(target=srv.start, daemon=True).start()
+    _launch(srv)
     return True
 
 

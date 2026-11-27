@@ -1,13 +1,24 @@
 // The side pane, like the Claude Code desktop app: a strip of tabs (open files, Files, Terminal, Browser, Changes),
 // a path bar, and the file shown with line numbers. Expand makes it take the conversation's place.
-import { createElement, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { currentLive, useStore, type PaneTab } from "@/lib/store";
+import { createElement, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { animatePanelDock, createHeldPanelMotion, type PanelBounds } from "./panelDockMotion";
+import { currentLive, PANE_TITLES, useStore, type PaneKind, type PaneTab } from "@/lib/store";
 import { SessionTitle } from "./TitleBar";
 import { get as apiGet, post } from "@/lib/api";
 import { bridge, isElectron, openPath } from "@/lib/desktop";
 import { RealTerminal } from "./RealTerminal";
 import { TasksPane } from "./TasksPane";
 import { CheckpointsPane } from "./CheckpointsPane";
+import { SearchPane } from "./SearchPane";
+import { ActivityPane } from "./ActivityPane";
+import { GitPane } from "./GitPane";
+import { ScriptsPane } from "./ScriptsPane";
+import { ProblemsPane } from "./ProblemsPane";
+import { TestsPane } from "./TestsPane";
+import { HttpPane } from "./HttpPane";
+import { PortsPane } from "./PortsPane";
+import { NotesPane } from "./NotesPane";
+import { DatabasePane } from "./DatabasePane";
 import { highlight } from "@/lib/markdown";
 import { basename, cn, tabsThatDoNotFit } from "@/lib/util";
 import * as I from "./icons";
@@ -19,17 +30,18 @@ import { Spinner, Tip } from "./ui";
 const ICON: Record<string, React.ReactNode> = {
   files: <I.FolderSm size={11} />, terminal: <I.Prompt size={11} />, browser: <I.GlobeSm size={11} />, diff: <I.FileDiff size={11} />,
   tasks: <I.ListTodo size={11} />, checkpoints: <I.Rewind size={11} />,
+  search: <I.SearchSm size={11} />, activity: <I.Activity size={11} />,
+  git: <I.BranchSm size={11} />, scripts: <I.Play size={11} />, problems: <I.AlertCircle size={11} />, tests: <I.Flask size={11} />,
+  http: <I.SendIcon size={11} />, ports: <I.Port size={11} />, notes: <I.StickyNote size={11} />, db: <I.Database size={11} />,
 };
 
-type Panel = { id: string; kind: "chat" | "viewer" | "terminal" | "browser" | "diff" | "tasks" | "checkpoints"; tabs: PaneTab[] };
-const PANEL_TITLE: Record<string, string> = { terminal: "Terminal", browser: "Browser", diff: "Changes", tasks: "Tasks", checkpoints: "Checkpoints" };
+type Panel = { id: string; kind: "chat" | "viewer" | PaneKind; tabs: PaneTab[] };
+const PANEL_TITLE: Record<string, string> = PANE_TITLES;
 const MIN_PX = 160;        // no panel is dragged narrower (or shorter) than this ...
 const CHAT_MIN_PX = 300;   // ... and the conversation not narrower than this
 const MIN_W_PX = 150;      // side by side a panel rests no narrower than this ...
 const FLOOR_W_PX = 96;     // ... but can be squeezed down to this while held
 const CLOSE_W_PX = 125;    // squeezed below this it looks shut, and letting go there closes it
-const EASE = "cubic-bezier(.2,.8,.2,1)";
-const EASE_MS = ".16s";
 const MIN_FR = 0.08;       // no panel gets smaller than this share of the side area
 
 // ------------------------------------------------------------------ the layout of the panels
@@ -40,6 +52,7 @@ const MIN_FR = 0.08;       // no panel gets smaller than this share of the side 
  *  a terminal keeps its shell, a page keeps its place. */
 type LNode = { t: "leaf"; id: string } | { t: "split"; dir: "row" | "col"; kids: LNode[]; sizes: number[] };
 type Edge = "left" | "right" | "top" | "bottom";
+type DropTarget = { id: string; edge: Edge } | null;
 type Rect = { x: number; y: number; w: number; h: number };       // in percent of the side area
 type Sep = { dir: "row" | "col"; x: number; y: number; len: number; parent: Rect; path: number[]; i: number; sizes: number[]; chatA: boolean; chatB: boolean };
 const LAYOUT_KEY = "emilie.paneLayout";
@@ -130,7 +143,7 @@ function layoutTree(n: LNode, r: Rect, path: number[], rects: Map<string, Rect>,
 }
 
 /** Which panel and which side of it the pointer is over (px inside the side area). */
-function dropTarget(rects: Map<string, Rect>, box: DOMRect, cx: number, cy: number, self: string): { id: string; edge: Edge } | null {
+function dropTarget(rects: Map<string, Rect>, box: DOMRect, cx: number, cy: number, self: string): DropTarget {
   const px = ((cx - box.left) / box.width) * 100, py = ((cy - box.top) / box.height) * 100;
   for (const [id, r] of rects) {
     if (px < r.x || px > r.x + r.w || py < r.y || py > r.y + r.h) continue;
@@ -141,6 +154,12 @@ function dropTarget(rects: Map<string, Rect>, box: DOMRect, cx: number, cy: numb
     return { id, edge };
   }
   return null;
+}
+
+function geometry(tree: LNode | null) {
+  const rects = new Map<string, Rect>(), seps: Sep[] = [];
+  if (tree) layoutTree(tree, { x: 0, y: 0, w: 100, h: 100 }, [], rects, seps);
+  return { rects, seps };
 }
 
 /** The working area, like Claude Code's: the conversation and the panels (Terminal, Browser, Changes, the file viewer)
@@ -154,7 +173,11 @@ export function Pane({ cwd, chat, chatTitle }: { cwd: string; chat: React.ReactN
   const [tree, setTree] = useState<LNode | null>(() => {
     try { return JSON.parse(localStorage.getItem(LAYOUT_KEY) || "null"); } catch { return null; }
   });
-  const [grab, setGrab] = useState<{ id: string; dx: number; dy: number; over: { id: string; edge: Edge } | null } | null>(null);
+  const [grab, setGrab] = useState<{ id: string; over: DropTarget } | null>(null);
+  const cancelGrab = useRef<(() => void) | null>(null);
+  const previousBounds = useRef<Map<HTMLElement, PanelBounds> | null>(null);
+  const landingPanel = useRef<HTMLElement | null>(null);
+  const animations = useRef(new Map<HTMLElement, Animation>());
   const [resizing, setResizing] = useState(false);   // a splitter is being dragged: the panels follow at once, no easing
 
   const panels = useMemo<Panel[]>(() => {
@@ -178,7 +201,14 @@ export function Pane({ cwd, chat, chatTitle }: { cwd: string; chat: React.ReactN
   useEffect(() => {
     const el = box.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => setCw(el.clientWidth));
+    let width = el.clientWidth, height = el.clientHeight;
+    const ro = new ResizeObserver(([entry]) => {
+      const { width: w, height: h } = entry.contentRect;
+      if (w !== width || h !== height) cancelGrab.current?.();
+      width = w;
+      height = h;
+      setCw(w);
+    });
     ro.observe(el);
     setCw(el.clientWidth);
     return () => ro.disconnect();
@@ -201,16 +231,55 @@ export function Pane({ cwd, chat, chatTitle }: { cwd: string; chat: React.ReactN
 
   // While a panel is held, the others already sit where they would be if it were dropped here (a live preview); the
   // panel itself stays lifted at its old size and follows the pointer, and a placeholder shows the slot it would take.
-  const base: LNode | null = eff && max && expanded ? { t: "leaf", id: expanded } : eff;
-  const over = grab?.over;
-  const rest = grab && over && base ? removeLeaf(base, grab.id) : null;
-  const lay = rest ? dock(rest, over!.id, grab!.id, over!.edge) : base;
-  const rects = new Map<string, Rect>(), seps: Sep[] = [];
-  if (lay) layoutTree(lay, { x: 0, y: 0, w: 100, h: 100 }, [], rects, seps);
-  const baseRects = new Map<string, Rect>();
-  if (grab && base) layoutTree(base, { x: 0, y: 0, w: 100, h: 100 }, [], baseRects, []);
-  const order = leafIds(lay);
+  const base = useMemo(() => eff && max && expanded ? { t: "leaf" as const, id: expanded } : eff, [eff, max, expanded]);
+  const original = useMemo(() => geometry(base), [base]);
+  const { rects, seps } = useMemo(() => {
+    if (!base || !grab?.over) return original;
+    const rest = removeLeaf(base, grab.id);
+    return rest ? geometry(dock(rest, grab.over.id, grab.id, grab.over.edge)) : original;
+  }, [base, original, grab]);
   const inset = solo || max ? 0 : 0.5;
+
+  // Read visual bounds together, and only when the prospective layout changes.
+  // Keeping interrupted animations in this measurement lets the next move pick
+  // up from the panel's visible position even when crossing targets rapidly.
+  const rememberBounds = useCallback((landing: HTMLElement | null = null) => {
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      previousBounds.current = null;
+      landingPanel.current = null;
+      return;
+    }
+    landingPanel.current = landing;
+    const before = new Map<HTMLElement, PanelBounds>();
+    for (const panel of box.current!.querySelectorAll<HTMLElement>(":scope > [data-dock-panel]")) {
+      before.set(panel, panel.getBoundingClientRect());
+    }
+    previousBounds.current = before;
+  }, []);
+  const animateToSlot = useCallback((el: HTMLElement, from: PanelBounds, to: PanelBounds, landing = false) => {
+    const animation = animatePanelDock(el, from, to, landing);
+    if (!animation) return;
+    animations.current.set(el, animation);
+    animation.onfinish = () => {
+      if (animations.current.get(el) === animation) animations.current.delete(el);
+    };
+  }, []);
+  useLayoutEffect(() => {
+    const before = previousBounds.current;
+    if (!before) return;
+    previousBounds.current = null;
+    for (const animation of animations.current.values()) animation.cancel();
+    animations.current.clear();
+    const moving = [...before.keys()].filter(el => el.isConnected && el.dataset.dockPanel !== grab?.id);
+    const destinations = moving.map(el => el.getBoundingClientRect());
+    moving.forEach((el, i) => animateToSlot(el, before.get(el)!, destinations[i], el === landingPanel.current));
+    landingPanel.current = null;
+  }, [base, grab, animateToSlot]);
+  useLayoutEffect(() => () => {
+    cancelGrab.current?.();
+    for (const animation of animations.current.values()) animation.cancel();
+    animations.current.clear();
+  }, [base]);
 
   const closeById = (id: string) => {
     const p = panels.find((x) => x.id === id);
@@ -257,40 +326,96 @@ export function Pane({ cwd, chat, chatTitle }: { cwd: string; chat: React.ReactN
     setResizing(true);
   };
 
-  const startGrab = (id: string, e: React.MouseEvent) => {
-    if (e.button !== 0 || (e.target as HTMLElement).closest("button, [role=button], input")) return;
-    if (order.length < 2) return;                                   // nothing to dock it next to
+  const startGrab = useCallback((id: string, e: React.MouseEvent) => {
+    if (e.button !== 0 || (e.target as Element).closest("button, [role=button], input, textarea, select, a, [contenteditable=true]")) return;
+    if (!base || original.rects.size < 2 || !box.current) return;
+    const panel = e.currentTarget.closest<HTMLElement>("[data-dock-panel]");
+    if (!panel) return;
+    cancelGrab.current?.();
+
+    const area = box.current.getBoundingClientRect();
     const x0 = e.clientX, y0 = e.clientY;
-    let started = false;
-    const b = () => box.current!.getBoundingClientRect();
-    const move = (ev: MouseEvent) => {
-      if (ev.buttons === 0) { up(ev); return; }              // the release was missed (a webview under the pointer)
-      if (!started && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 6) return;
-      started = true;
-      setGrab({ id, dx: ev.clientX - x0, dy: ev.clientY - y0, over: dropTarget(rects, b(), ev.clientX, ev.clientY, id) });
+    const priorAnimation = animations.current.get(panel);
+    const visible = priorAnimation ? panel.getBoundingClientRect() : undefined;
+    priorAnimation?.cancel();
+    animations.current.delete(panel);
+    const motion = createHeldPanelMotion(panel, x0, y0, panel.getBoundingClientRect(), visible);
+    const body = document.body;
+    const oldCursor = body.style.cursor, oldSelect = body.style.userSelect;
+    let x = x0, y = y0, raf = 0, started = false, previewed = false, pointerMoved = false;
+    let over: DropTarget = null;
+
+    const paint = (time: number) => {
+      raf = 0;
+      if (pointerMoved) {
+        pointerMoved = false;
+        const next = dropTarget(original.rects, area, x, y, id);
+        if (!previewed || next?.id !== over?.id || next?.edge !== over?.edge) {
+          rememberBounds();
+          previewed = true;
+          over = next;
+          setGrab({ id, over });
+        }
+      }
+      if (motion.move(x, y, time)) raf = requestAnimationFrame(paint);
     };
-    const up = (ev: MouseEvent) => {
+    const move = (ev: MouseEvent) => {
+      if (ev.buttons === 0) { up(ev); return; }
+      x = ev.clientX;
+      y = ev.clientY;
+      if (!started && Math.hypot(x - x0, y - y0) < 6) return;
+      started = true;
+      pointerMoved = true;
+      if (!raf) raf = requestAnimationFrame(paint);
+    };
+    const finish = (target: DropTarget, animate: boolean) => {
+      cancelAnimationFrame(raf);
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
-      window.removeEventListener("blur", blur);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-      document.body.classList.remove("dragging");
-      if (!started) return;
-      const t = dropTarget(rects, b(), ev.clientX, ev.clientY, id);
-      setGrab(null);
-      if (!t) return;
-      const rest = removeLeaf(eff!, id);
-      if (rest) setTree(dock(rest, t.id, id, t.edge));
+      window.removeEventListener("blur", cancel);
+      window.removeEventListener("keydown", key);
+      cancelGrab.current = null;
+      body.style.cursor = oldCursor;
+      body.style.userSelect = oldSelect;
+      body.classList.remove("dragging");
+
+      const layoutChanged = previewed || !!target;
+      if (animate && layoutChanged) rememberBounds(panel);
+      const pressed = animate && !layoutChanged ? panel.getBoundingClientRect() : null;
+      motion.finish();
+      if (previewed) setGrab(null);
+      if (target) {
+        const rest = removeLeaf(base, id);
+        if (rest) setTree(dock(rest, target.id, id, target.edge));
+      } else if (pressed) {
+        animateToSlot(panel, pressed, panel.getBoundingClientRect(), true);
+      }
     };
-    const blur = () => up(new MouseEvent("mouseup", { clientX: x0, clientY: y0 }));
-    document.body.style.cursor = "grabbing";
-    document.body.style.userSelect = "none";
-    document.body.classList.add("dragging");
+    const up = (ev: MouseEvent) => {
+      if (ev.button !== 0 && ev.buttons !== 0) return;
+      const moved = started || Math.hypot(ev.clientX - x0, ev.clientY - y0) >= 6;
+      // Mouseup can arrive before the last scheduled frame; use its coordinates
+      // for both the panel's release position and the committed docking edge.
+      if (moved) motion.move(ev.clientX, ev.clientY, performance.now());
+      finish(moved ? dropTarget(original.rects, area, ev.clientX, ev.clientY, id) : null, true);
+    };
+    const cancel = () => finish(null, true);
+    const key = (ev: KeyboardEvent) => { if (ev.key === "Escape") { ev.preventDefault(); cancel(); } };
+
+    cancelGrab.current = () => finish(null, false);
+    body.style.cursor = "grabbing";
+    body.style.userSelect = "none";
+    body.classList.add("dragging");
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
-    window.addEventListener("blur", blur);
-  };
+    window.addEventListener("blur", cancel);
+    window.addEventListener("keydown", key);
+  }, [base, original, rememberBounds, animateToSlot]);
+
+  const toggleExpand = useCallback((id: string) => {
+    setSnap(true);
+    setExpanded(current => current === id ? null : id);
+  }, []);
 
   const geo = (r: Rect): React.CSSProperties =>
     ({ left: `calc(${r.x}% + ${inset}px)`, top: `calc(${r.y}% + ${inset}px)`, width: `calc(${r.w}% - ${inset * 2}px)`, height: `calc(${r.h}% - ${inset * 2}px)` });
@@ -298,17 +423,22 @@ export function Pane({ cwd, chat, chatTitle }: { cwd: string; chat: React.ReactN
   return (
     <div ref={box} className={cn("relative min-h-0 min-w-0 flex-1", solo || max ? "bg-bg-100" : "bg-border-300 dark:bg-[#353535]")}>
       {panels.map((p) => {
-        const r = grab?.id === p.id ? baseRects.get(p.id) : rects.get(p.id);     // the lifted one keeps its own size
+        const held = grab?.id === p.id;
+        const r = (held ? original.rects : rects).get(p.id);
         return (
-          <PanelView key={p.id} p={p} cwd={cwd} chat={chat} chatTitle={chatTitle} solo={solo}
-            expanded={expanded === p.id} onExpand={() => { setSnap(true); setExpanded(expanded === p.id ? null : p.id); }}
-            lift={grab?.id === p.id ? grab : null} ease={!resizing && !snap}
-            onGrab={(e) => startGrab(p.id, e)} style={r ? (shutting === p.id ? { ...geo(r), opacity: 0.35 } : geo(r)) : { display: "none" }} />
+          <section key={p.id} data-dock-panel={p.id}
+            className={cn("absolute flex min-h-0 min-w-0 flex-col bg-bg-100",
+              held && "pointer-events-none z-40 overflow-hidden rounded-[10px] shadow-2xl ring-1 ring-border-400",
+              !grab && !previousBounds.current && !resizing && !snap && "dock-ease")}
+            style={r ? (shutting === p.id ? { ...geo(r), opacity: 0.35 } : geo(r)) : { display: "none" }}>
+            <PanelView p={p} cwd={cwd} chat={p.kind === "chat" ? chat : null} chatTitle={chatTitle} solo={solo}
+              expanded={expanded === p.id} toggleExpand={toggleExpand} startGrab={startGrab} />
+          </section>
         );
       })}
       {grab && rects.get(grab.id) && (
         <div className="absolute rounded-[3px] border border-accent/40 bg-bg-200"
-          style={{ ...geo(rects.get(grab.id)!), transition: ["left", "top", "width", "height"].map((k) => `${k} ${EASE_MS} ${EASE}`).join(", ") }} />
+          style={geo(rects.get(grab.id)!)} />
       )}
       {seps.map((sp, i) => (
         <div key={i} onMouseDown={startSplit(sp)}
@@ -341,25 +471,16 @@ function drag(move: (e: MouseEvent) => void, cursor: string, onEnd?: () => void)
   window.addEventListener("blur", up);
 }
 
-type Lift = { dx: number; dy: number } | null;
+const PanelView = memo(function PanelView({ p, cwd, chat, chatTitle, solo, expanded, toggleExpand, startGrab }: {
+  p: Panel; cwd: string; chat: React.ReactNode; chatTitle: string; solo: boolean; expanded: boolean;
+  toggleExpand: (id: string) => void; startGrab: (id: string, e: React.MouseEvent) => void;
+}) {
+  const onGrab = (e: React.MouseEvent) => startGrab(p.id, e);
+  const onExpand = () => toggleExpand(p.id);
 
-/** How a panel sits and moves: lifted it follows the pointer as a floating card (a transform, so it never remounts and
- *  nothing clips it); otherwise its position and size ease to where the layout puts them. */
-function frame(style: React.CSSProperties, lift: Lift, ease: boolean): { className: string; style: React.CSSProperties } {
-  const t = ["left", "top", "width", "height", "transform"].map((k) => `${k} ${EASE_MS} ${EASE}`).join(", ");
-  return {
-    className: cn("absolute flex min-h-0 min-w-0 flex-col bg-bg-100", lift && "pointer-events-none z-40 overflow-hidden rounded-[10px] shadow-2xl ring-1 ring-border-400"),
-    style: { ...style, transform: lift ? `translate3d(${lift.dx}px, ${lift.dy}px, 0) scale(1.015)` : "none",
-      transition: lift ? "box-shadow .15s" : ease ? t : "none", willChange: lift ? "transform" : undefined },
-  };
-}
-
-function PanelView({ p, cwd, chat, chatTitle, solo, expanded, onExpand, style, lift, ease, onGrab }:
-  { p: Panel; cwd: string; chat: React.ReactNode; chatTitle: string; solo: boolean; expanded: boolean; onExpand: () => void; style: React.CSSProperties; lift: Lift; ease: boolean; onGrab: (e: React.MouseEvent) => void }) {
   const paneActive = useStore((st) => st.paneActive);
   const inSession = useStore((st) => !!currentLive(st));
   const wid = useStore((st) => currentLive(st)?.wid || "none");
-  const f = frame(style, lift, ease);
   const closePanel = () => {
     const s = useStore.getState();
     const keep = s.paneTabs.filter((t) => !p.tabs.some((x) => x.key === t.key));
@@ -369,7 +490,7 @@ function PanelView({ p, cwd, chat, chatTitle, solo, expanded, onExpand, style, l
   };
   if (p.kind === "chat") {
     return (
-      <section className={f.className} style={f.style}>
+      <>
         {!solo && (
           <div onMouseDown={onGrab} className="flex h-[27px] shrink-0 cursor-grab items-center gap-1.5 border-b border-border-300 px-3 text-[11.5px] text-text-100 dark:border-[#353535]">
             {inSession ? <span className="flex min-w-0" onMouseDown={(e) => e.stopPropagation()}><SessionTitle /></span>
@@ -377,39 +498,31 @@ function PanelView({ p, cwd, chat, chatTitle, solo, expanded, onExpand, style, l
           </div>
         )}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">{chat}</div>
-      </section>
+      </>
     );
   }
   if (p.kind === "diff") {
-    return (
-      <section className={f.className} style={f.style}>
-        <DiffPane cwd={cwd} onGrab={onGrab} max={expanded} onExpand={onExpand} onClose={closePanel} />
-      </section>
-    );
+    return <DiffPane cwd={cwd} onGrab={onGrab} max={expanded} onExpand={onExpand} onClose={closePanel} />;
   }
   if (p.kind === "terminal" && bridge?.ptyCreate) {
     return (
-      <section className={f.className} style={f.style}>
-        <RealTerminal cwd={cwd} fallback={<TerminalPane cwd={cwd} />} chrome={{ onGrab, expanded, onExpand, onClose: closePanel }} />
-      </section>
+      <RealTerminal cwd={cwd} fallback={<TerminalPane cwd={cwd} />} chrome={{ onGrab, expanded, onExpand, onClose: closePanel }} />
     );
   }
   if (p.kind === "browser") {
-    return (
-      <section className={f.className} style={f.style}>
-        <BrowserPane key={wid} wid={wid} chrome={{ onGrab, expanded, onExpand, onClose: closePanel }} />
-      </section>
-    );
+    return <BrowserPane key={wid} wid={wid} chrome={{ onGrab, expanded, onExpand, onClose: closePanel }} />;
   }
   const tab = p.kind === "viewer" ? (p.tabs.find((t) => t.key === paneActive) || p.tabs[p.tabs.length - 1]) : p.tabs[0];
   return (
-    <section className={f.className} style={f.style}>
+    <>
       <div onMouseDown={onGrab} className="flex h-[27px] shrink-0 cursor-grab items-center gap-1 border-b border-border-300 px-2 dark:border-[#353535]">
-        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
-          {p.kind === "viewer"
-            ? p.tabs.map((t) => <TabChip key={t.key} t={t} active={t.key === tab.key} />)
-            : <span className="flex h-[22px] items-center gap-1.5 px-1 text-[11.5px] text-text-100"><span className="text-text-300">{ICON[p.kind]}</span>{PANEL_TITLE[p.kind]}</span>}
-        </div>
+        {p.kind === "viewer"
+          ? <ViewerTabs tabs={p.tabs} active={tab.key} />
+          : (
+            <div className="flex min-w-0 flex-1 items-center overflow-hidden">
+              <span className="flex h-[22px] min-w-0 items-center gap-1.5 px-1 text-[11.5px] text-text-100"><span className="shrink-0 text-text-300">{ICON[p.kind]}</span><span className="truncate">{PANEL_TITLE[p.kind]}</span></span>
+            </div>
+          )}
         <Tip content={expanded ? "Restore" : "Expand"}>
           <button onClick={onExpand} className="flex h-[22px] w-[22px] items-center justify-center rounded-[5px] text-text-100 hover:bg-hover">
             {expanded ? <I.Shrink size={12} /> : <I.Expand size={12} />}
@@ -424,24 +537,99 @@ function PanelView({ p, cwd, chat, chatTitle, solo, expanded, onExpand, style, l
         {tab.kind === "files" && <FilesPane cwd={cwd} />}
         {tab.kind === "tasks" && <TasksPane />}
         {tab.kind === "checkpoints" && <CheckpointsPane />}
+        {tab.kind === "search" && <SearchPane key={cwd} cwd={cwd} />}
+        {tab.kind === "activity" && <ActivityPane />}
+        {tab.kind === "git" && <GitPane key={cwd} cwd={cwd} />}
+        {tab.kind === "scripts" && <ScriptsPane key={cwd} cwd={cwd} />}
+        {tab.kind === "problems" && <ProblemsPane key={cwd} cwd={cwd} />}
+        {tab.kind === "tests" && <TestsPane key={cwd} cwd={cwd} />}
+        {tab.kind === "http" && <HttpPane key={cwd} cwd={cwd} />}
+        {tab.kind === "ports" && <PortsPane />}
+        {tab.kind === "notes" && <NotesPane key={cwd} cwd={cwd} />}
+        {tab.kind === "db" && <DatabasePane key={cwd} cwd={cwd} />}
         {tab.kind === "terminal" && (bridge?.ptyCreate ? <RealTerminal cwd={cwd} fallback={<TerminalPane cwd={cwd} />} /> : <TerminalPane cwd={cwd} />)}
       </div>
-    </section>
+    </>
+  );
+});
+
+/** The viewer's tabs, behaving like the Terminal's: they are squeezed first, and the ones that still do not fit are
+ *  listed under the V button. The chosen tab never goes into the list. */
+function ViewerTabs({ tabs, active }: { tabs: PaneTab[]; active: string }) {
+  const strip = useRef<HTMLDivElement>(null);
+  const [hidden, setHidden] = useState<string[]>([]);
+  const [listOpen, setListOpen] = useState(false);
+  const [compact, setCompact] = useState(false);        // very narrow: "Files" is its icon only, so the chosen file keeps its tab
+  const filesW = useRef(0);
+  const keys = tabs.map((t) => t.key).join("|");
+  useEffect(() => {
+    const el = strip.current;
+    if (!el) return;
+    const check = () => {
+      // "Files" always stays whole in the strip: the file tabs share what is left of it
+      const chip = el.querySelector<HTMLElement>("[data-fixed]");
+      if (chip && !chip.dataset.compact) filesW.current = chip.offsetWidth;
+      const small = !!chip && active !== "files" && el.clientWidth - filesW.current - 4 < 64;
+      setCompact(small);
+      const fixed = !chip ? 0 : small ? 28 : filesW.current;
+      const files = tabs.filter((t) => t.kind !== "files").map((t) => t.key);
+      const out = tabsThatDoNotFit(files, active, el.clientWidth - (fixed ? fixed + 4 : 0), 64, 48);
+      setHidden((h) => (h.length === out.length && h.every((x, i) => x === out[i]) ? h : out));
+    };
+    check();
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [keys, active, compact]);   // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (!hidden.length) setListOpen(false); }, [hidden.length]);
+  const s = useStore.getState();
+  return (
+    <>
+      <div ref={strip} className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
+        {tabs.map((t) => <TabChip key={t.key} t={t} active={t.key === active} hidden={hidden.includes(t.key)} compact={compact} />)}
+      </div>
+      {hidden.length > 0 && (
+        <Menu open={listOpen} onOpenChange={setListOpen}>
+          <MenuTrigger asChild>
+            <button title="More tabs" onMouseDown={(e) => e.stopPropagation()}
+              className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[5px] text-text-100 hover:bg-hover"><I.ChevD size={12} /></button>
+          </MenuTrigger>
+          <MenuContent align="end" className="min-w-[220px]">
+            {tabs.filter((t) => hidden.includes(t.key)).map((t) => (
+              <div key={t.key} className="flex items-center rounded-[5px] hover:bg-active">
+                <button title={t.path || t.title} className="min-w-0 flex-1 truncate px-2 py-[5px] text-left text-[12px] text-text-100"
+                  onClick={() => { s.activateTab(t.key); setListOpen(false); }}>{t.title}</button>
+                {t.kind !== "files" && (
+                  <button aria-label="Close tab" title="Close tab" onClick={() => s.closeTab(t.key)}
+                    className="mr-0.5 flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-[5px] text-text-300 hover:bg-hover hover:text-text-000"><I.X size={15} /></button>
+                )}
+              </div>
+            ))}
+          </MenuContent>
+        </Menu>
+      )}
+    </>
   );
 }
 
-function TabChip({ t, active }: { t: PaneTab; active: boolean }) {
+function TabChip({ t, active, hidden, compact }: { t: PaneTab; active: boolean; hidden: boolean; compact: boolean }) {
   const s = useStore.getState();
+  const closable = t.kind !== "files";                    // the Files tree is always there; the panel's own X closes it
   return (
-    <div role="button" onClick={() => s.activateTab(t.key)} title={t.path || t.title}
-      className={cn("group flex h-[22px] shrink-0 items-center gap-1.5 rounded-[5px] pl-2 pr-1 text-[11.5px]",
-        active ? "bg-bg-400 text-text-000" : "text-text-300 hover:bg-hover hover:text-text-100")}>
-      {t.kind !== "file" && <span className="text-text-300">{ICON[t.kind]}</span>}
-      <span className={cn("max-w-[180px] truncate", t.kind === "file" && "italic")}>{t.title}</span>
-      <button aria-label="Close tab" onClick={(e) => { e.stopPropagation(); s.closeTab(t.key); }}
-        className={cn("flex h-[16px] w-[16px] items-center justify-center rounded-[4px] hover:bg-hover", !active && "opacity-0 group-hover:opacity-100")}>
-        <I.X size={10} />
-      </button>
+    <div role="button" data-fixed={closable ? undefined : ""} data-compact={!closable && compact ? "1" : undefined} onClick={() => s.activateTab(t.key)} title={t.path || t.title}
+      className={cn("group relative flex h-[22px] items-center gap-1.5 rounded-[5px] pl-2 text-[11.5px]",
+        active ? "bg-bg-400 text-text-000" : "text-text-300 hover:bg-hover hover:text-text-100",
+        !closable ? "shrink-0" : active ? "min-w-[64px] shrink" : "min-w-[48px] shrink",
+        active && closable ? "pr-1" : "pr-2", hidden && "hidden")}>
+      {t.kind !== "file" && <span className="shrink-0 text-text-300">{ICON[t.kind]}</span>}
+      {(closable || !compact) && <span className={cn("min-w-0 max-w-[180px] truncate", t.kind === "file" && "italic")}>{t.title}</span>}
+      {closable && (
+        <button aria-label="Close tab" onClick={(e) => { e.stopPropagation(); s.closeTab(t.key); }}
+          className={cn("flex h-[16px] w-[16px] shrink-0 items-center justify-center rounded-[4px] hover:bg-hover",
+            !active && "absolute right-[2px] top-[3px] bg-bg-400 opacity-0 group-hover:opacity-100")}>
+          <I.X size={10} />
+        </button>
+      )}
     </div>
   );
 }
@@ -463,17 +651,19 @@ function FileTab({ path, cwd }: { path: string; cwd: string }) {
   const inside = !!root && path.toLowerCase().startsWith(root.toLowerCase() + (path[root.length] === "/" ? "/" : "\\"));
   const parts = (inside ? path.slice(root.length + 1) : path).split(/[\\/]/).filter(Boolean);
   const markdown = file?.kind === "text" && /^(md|markdown|mdx)$/i.test(String(file.ext || "").replace(/^\./, ""));
+  const go = useStore((s) => (s.fileGo?.path === path ? s.fileGo : null));
+  useEffect(() => { if (go) setSource(true); }, [go?.n]);   // eslint-disable-line react-hooks/exhaustive-deps  (a line is a line of the source)
   return (
     <div className="flex h-full flex-col">
       {/* the path sits between two lines: the tab row's and its own */}
       <div className="flex h-[34px] shrink-0 items-center gap-1 border-b border-border-300 px-3 text-[11px] dark:border-[#353535]">
         <div className="flex min-w-0 flex-1 items-center text-text-400" title={path}>
           {/* the folders shrink (with an ellipsis) so the file name always stays readable */}
-          <span className="min-w-0 truncate">
+          <span className="min-w-0 shrink-[9999] truncate">
             {parts.slice(0, -1).map((p, i) => <span key={i}>{i > 0 && <span className="mx-1">\</span>}{p}</span>)}
           </span>
           {parts.length > 1 && <span className="mx-1 shrink-0">\</span>}
-          <span className="shrink-0 text-text-100">{parts[parts.length - 1]}</span>
+          <span className="min-w-0 truncate text-text-100">{parts[parts.length - 1]}</span>
         </div>
         {markdown && (
           <Tip content={source ? "Show it rendered" : "Show the source"}>
@@ -488,7 +678,7 @@ function FileTab({ path, cwd }: { path: string; cwd: string }) {
       <div className="min-h-0 flex-1 overflow-auto" style={file?.kind === "text" && !markdown ? { background: "var(--code-bg-custom, transparent)" } : undefined}>
         {!file && <div className="p-3"><Spinner /></div>}
         {markdown && !source && <Markdown text={file.text} className="px-5 py-4" />}
-        {file?.kind === "text" && (!markdown || source) && <CodeView text={file.text} ext={file.ext || ""} />}
+        {file?.kind === "text" && (!markdown || source) && <CodeView text={file.text} ext={file.ext || ""} line={go?.line} at={go?.n} />}
         {file?.kind === "image" && <img src={file.url} alt="" className="m-3 max-w-[calc(100%-24px)] rounded-md" />}
         {file?.kind === "video" && <video src={file.url} controls className="m-3 max-w-[calc(100%-24px)] rounded-md" />}
         {file?.kind === "pdf" && <iframe src={file.url} className="h-full w-full border-0" title="pdf" />}
@@ -499,13 +689,18 @@ function FileTab({ path, cwd }: { path: string; cwd: string }) {
   );
 }
 
-function CodeView({ text, ext }: { text: string; ext: string }) {
+function CodeView({ text, ext, line, at }: { text: string; ext: string; line?: number; at?: number }) {
+  const gutter = useRef<HTMLDivElement>(null);
+  // a search result: bring its line to the middle (at: clicking the same result again scrolls again)
+  useEffect(() => {
+    if (line) gutter.current?.children[line - 1]?.scrollIntoView({ block: "center", inline: "nearest" });
+  }, [line, at, text]);
   const html = useMemo(() => highlight(text, ext), [text, ext]);
   const lines = useMemo(() => text.split("\n").length, [text]);
   return (
     <div className="code-view flex min-w-max py-1" style={{ minHeight: "100%" }}>
-      <div className="gutter sticky left-0 shrink-0">
-        {Array.from({ length: lines }, (_, i) => <div key={i} className={i === 0 ? "cur" : ""}>{i + 1}</div>)}
+      <div ref={gutter} className="gutter sticky left-0 shrink-0">
+        {Array.from({ length: lines }, (_, i) => <div key={i} className={i === (line || 1) - 1 ? "cur" : ""}>{i + 1}</div>)}
       </div>
       <pre className="m-0 pr-6 text-text-100 selectable"><code className="hljs" dangerouslySetInnerHTML={{ __html: html }} /></pre>
     </div>
@@ -710,7 +905,7 @@ function BrowserPane({ wid, chrome }: { wid: string; chrome?: { onGrab: (e: Reac
     try { await cur()?.executeJavaScript?.("localStorage.clear();sessionStorage.clear();document.cookie.split(';').forEach(c=>document.cookie=c.split('=')[0]+'=;expires=Thu,01 Jan 1970 00:00:00 GMT;path=/')"); } catch { /* none */ }
     cur()?.reload?.();
   };
-  const btn = "flex h-[22px] w-[22px] items-center justify-center rounded-[5px] text-text-100 hover:bg-hover disabled:opacity-35";
+  const btn = "flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[5px] text-text-100 hover:bg-hover disabled:opacity-35";
   const vp = st.viewport === "mobile" ? { w: 375 } : st.viewport === "tablet" ? { w: 768 } : null;
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -783,7 +978,7 @@ function BrowserPane({ wid, chrome }: { wid: string; chrome?: { onGrab: (e: Reac
         <button className={btn} disabled={!isElectron || !tab.url} onClick={() => cur()?.goForward?.()}><I.ChevR size={12} /></button>
         <button className={btn} disabled={!tab.url} onClick={() => (isElectron ? cur()?.reload?.() : setReloads((n) => n + 1))}><I.Refresh size={11} /></button>
         <input value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => e.key === "Enter" && go(draft)} placeholder="Type a URL"
-          className="h-[24px] flex-1 rounded-[6px] bg-bg-400 px-2.5 text-[11.5px] outline-none placeholder:text-text-500 selectable" />
+          className="h-[24px] w-0 min-w-0 flex-1 rounded-[6px] bg-bg-400 px-2.5 text-[11.5px] outline-none placeholder:text-text-500 selectable" />
       </div>
       <div className="relative min-h-0 flex-1 overflow-auto bg-bg-100">
         {st.tabs.map((t) => (
@@ -942,6 +1137,12 @@ function DiffPane({ cwd, onGrab, max, onExpand, onClose }: { cwd: string; onGrab
   useEffect(() => { if (cwd) load(); }, [cwd, busy, modeKey]);   // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (cwd) loadInfo(); }, [cwd, busy]);          // eslint-disable-line react-hooks/exhaustive-deps
   const choose = (m: DiffMode) => { setMode(m); setData(null); setOpen({}); setSel(""); };
+  const go = useStore((s) => s.diffGo);                            // the Git panel's "Show diff" of one commit
+  useEffect(() => {
+    if (!go?.commit) return;
+    choose({ kind: "commit", commit: go.commit });
+    useStore.setState({ diffGo: null });                           // used once: reopening Changes starts from all changes again
+  }, [go?.n]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   const all = useMemo(() => {
     if (!data) return [];

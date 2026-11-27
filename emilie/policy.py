@@ -1,4 +1,5 @@
 """Permission policy: what passes automatically, what must be asked."""
+import os
 import re
 import shlex
 from pathlib import Path
@@ -6,7 +7,8 @@ from .i18n import t as tr_, N_
 
 READONLY_TOOLS = {"read_file", "grep", "glob", "todo_write", "use_skill", "web_search", "task", "tasks",   # task(s) = read-only sub-agents
                   "bg_output", "bg_stop",                  # only touch background tasks Emilie itself started
-                  "docx_read", "xlsx_read", "pptx_read"}   # Office readers never change anything
+                  "docx_read", "xlsx_read", "pptx_read",
+                  "load_mcp"}                              # only changes which tool definitions are sent   # Office readers never change anything
 WRITE_TOOLS = {"write_file", "edit_file", "notebook_edit", "docx_edit", "docx_create", "xlsx_write"}   # change files, same rules
 MODES = ("ask", "trust", "plan")
 
@@ -75,15 +77,45 @@ def _redirect_targets(cmd: str) -> list[str]:
     return out
 
 
-_SPLIT = re.compile(r"&&|\|\||;|\||\n")
+_SPLIT = re.compile(r"&&|\|\||;|\||\r|\n")
 _REDIR_OK = re.compile(r"\d?>\s*/dev/null|2>&1|&>\s*/dev/null")
+
+
+IS_WIN = os.name == "nt"                       # the shell that will run the command: PowerShell, else /bin/sh
+_PLAIN_VAR = re.compile(r"\$\{[\w:]+\}")       # ${HOME}, ${env:PATH}: only reads a variable
+_CURLY_QUOTES = "‘’‚‛“”„"
+
+
+def _has_nested_code(cmd: str) -> bool:
+    """An UNQUOTED construct that can run another command: (...), a lone `&`, and on PowerShell also {...}.
+    The first word of such a command says nothing about what is inside."""
+    # PowerShell also treats curly quotes as quotes, and sh has $'...' with its own escapes: don't guess, ask
+    if (any(ch in cmd for ch in _CURLY_QUOTES) if IS_WIN else "$'" in cmd):
+        return True
+    c = _PLAIN_VAR.sub("", cmd).replace("&&", ";")
+    bad = "(){}&" if IS_WIN else "()&"          # in sh, { } inside a word is just text or brace expansion
+    q, i = None, 0
+    while i < len(c):
+        ch = c[i]
+        if ch == "\\" and not IS_WIN and q != "'":  # backslash escapes in sh, but is a plain character in PowerShell
+            i += 2
+            continue
+        if q:
+            if ch == q:
+                q = None
+        elif ch in "'\"":
+            q = ch
+        elif ch in bad:
+            return True
+        i += 1
+    return False
 
 
 def is_readonly_cmd(cmd: str) -> bool:
     if "$(" in cmd or "`" in cmd:
         return False
     c = _REDIR_OK.sub("", cmd)
-    if ">" in c or "<(" in c:
+    if ">" in c or "<(" in c or _has_nested_code(c):
         return False
     segs = [s.strip() for s in _SPLIT.split(c) if s.strip()]
     if not segs:
@@ -251,6 +283,10 @@ class Policy:
             if self.trusted or name in self.always:
                 return "allow", ""
             return "ask", ""
+        if name in ("render_diagram", "render_drawio"):
+            if plan:
+                return "deny", tr_('plan mode: files cannot be changed')
+            return ("allow", "") if (self.trusted or name in self.always) else ("ask", "")
         if name == "notebook_edit":                     # listing or reading cells changes nothing
             ops = args.get("edits") or [args]
             if all(isinstance(o, dict) and o.get("action") in ("list", "get") for o in ops):
@@ -268,7 +304,7 @@ class Policy:
             if plan:
                 return "deny", tr_('plan mode: MCP tools are blocked')
             return ("allow", "") if (self.trusted or name in self.always) else ("ask", "")
-        if name == "web_fetch":
+        if name in ("web_fetch", "read_page"):
             from urllib.parse import urlparse
             if self.trusted or name in self.always:
                 return "allow", ""

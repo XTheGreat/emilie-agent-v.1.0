@@ -1,7 +1,7 @@
 // Everything shown in a conversation: messages, tool calls, command output, the working line.
 import { highlight } from "@/lib/markdown";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { Block, Checkpoint, Diff, Item, Todo } from "@/lib/types";
+import type { Block, Checkpoint, Diff, Item, Todo, VoiceClip } from "@/lib/types";
 import { markdownBlocks, type MdBlock } from "@/lib/markdown";
 import { openExternal, openPath } from "@/lib/desktop";
 import { cn, copyText } from "@/lib/util";
@@ -9,34 +9,34 @@ import { currentLive, useLiveInfo, useStore } from "@/lib/store";
 import { media, post } from "@/lib/api";
 import {
   Ban, Book, Bot, Check, ChevronDown, ChevronRight, Copy, FileText, Globe, ListTodo, Loader, Pencil, Plug, Rewind,
-  Search, Terminal, Wrench, Circle, CircleCheck, CircleDot, AlertCircle, FileIcon, Sparkles, Split, Pin, PinOff, Volume,
-  Alert, CircleX, Info,
+  Search, Terminal, Wrench, Circle, CircleCheck, AlertCircle, FileIcon, Sparkles, Split, Pin, PinOff, Volume,
+  Alert, CircleX, Info, RotateCcw,
 } from "./icons";
 import { Tip } from "./ui";
-import { Bloom, MarkSlot, Shimmer, WorkMark, type WorkKind } from "./WorkMarks";
+import { TodoSpinner } from "./Requests";
+import { insertIntoComposer } from "./Composer";
+import { Bloom, MarkSlot, Shimmer, VoiceRibbon, WorkMark, type WorkKind } from "./WorkMarks";
 
 // ------------------------------------------------------------------ markdown with copy buttons and safe links
-/** What a Markdown element shows: its pieces (markdownBlocks) and the elements each piece became. */
-type Drawn = { blocks: MdBlock[]; nodes: ChildNode[][] };
+type Drawn = { text?: string; blocks: MdBlock[] };
 
 /** Brings `el` up to `text` piece by piece: the pieces that did not change keep their elements as they are, only the
  *  ones from the first change on are rebuilt. The pieces are placed straight in `el`, in order, exactly as one HTML string
  *  would place them, so the .md styles (:first-child, p + p, …) apply as before. */
 function drawBlocks(el: HTMLElement, d: Drawn, text: string): void {
+  if (text === d.text) return;
   const next = markdownBlocks(text, d.blocks);
+  d.text = text;
   let k = 0;
   while (k < next.length && k < d.blocks.length && next[k] === d.blocks[k]) k++;
   if (k === next.length && k === d.blocks.length) return;
-  for (let i = k; i < d.nodes.length; i++) for (const n of d.nodes[i]) n.remove();
-  const nodes = d.nodes.slice(0, k);
-  const tpl = document.createElement("template");
+  for (let i = k; i < d.blocks.length; i++) for (const node of d.blocks[i].nodes) node.remove();
+  const tail = document.createDocumentFragment();
   for (let i = k; i < next.length; i++) {
-    tpl.innerHTML = next[i].html;
-    nodes.push(Array.from(tpl.content.childNodes));
-    el.append(tpl.content);
+    for (const node of next[i].nodes) tail.appendChild(node);
   }
+  el.appendChild(tail);
   d.blocks = next;
-  d.nodes = nodes;
 }
 
 /** A reply, drawn piece by piece. While it streams only the piece that is still growing (the last paragraph, list or
@@ -45,7 +45,7 @@ function drawBlocks(el: HTMLElement, d: Drawn, text: string): void {
  *  most every 40 ms (less often when one is slow, e.g. a long code block), the newest text each time. */
 export const Markdown = memo(function Markdown({ text, className, streaming }: { text: string; className?: string; streaming?: boolean }) {
   const box = useRef<HTMLDivElement>(null);
-  const drawn = useRef<Drawn>({ blocks: [], nodes: [] });
+  const drawn = useRef<Drawn>({ blocks: [] });
   const latest = useRef(text);
   latest.current = text;
   const pace = useRef({ timer: 0, at: 0, cost: 0 });
@@ -209,31 +209,86 @@ function UserMessage({ item, checkpoint, onRewind }: { item: Extract<Item, { kin
         {item.queued && <span className="rounded bg-bg-300 px-1.5">Queued</span>}
         {item.failed && <span className="text-danger">Not sent</span>}
         {item.spoken && <span>spoken</span>}
-        <span className="flex text-text-300 opacity-0 transition-opacity group-hover:opacity-100">
+        <UserActions item={item} checkpoint={checkpoint} onRewind={onRewind}>
           <Tip content={copied ? "Copied" : "Copy"}>
-            <button className="flex h-[18px] w-[18px] items-center justify-center rounded-[4px] hover:bg-hover hover:text-text-100" onClick={() => copyText(item.prompt || item.text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1200); })}>
+            <button aria-label="Copy" className={USER_BTN} onClick={() => copyText(item.prompt || item.text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1200); })}>
               {copied ? <Check size={11} strokeWidth={1.9} /> : <Copy size={11} strokeWidth={1.9} />}
             </button>
           </Tip>
-          {checkpoint && onRewind && (
-            <Tip content="Rewind: restore the files and the chat to just before this message">
-              <button className="flex h-[18px] w-[18px] items-center justify-center rounded-[4px] hover:bg-hover hover:text-text-100" onClick={() => onRewind(checkpoint.n)}><Rewind size={11} strokeWidth={1.9} /></button>
-            </Tip>
-          )}
-        </span>
+        </UserActions>
       </div>
     </div>
   );
 }
 
+const USER_BTN = "flex h-[18px] w-[18px] items-center justify-center rounded-[4px] hover:bg-hover hover:text-text-100 disabled:opacity-40";
+
+/** Under your own message: when it was sent, fork from before it, go back to it, copy (the child). */
+function UserActions({ item, checkpoint, onRewind, children }:
+  { item: Extract<Item, { kind: "user" }>; checkpoint?: Checkpoint; onRewind?: (n: number) => void; children: React.ReactNode }) {
+  const live = useLiveInfo();
+  const [forking, setForking] = useState(false);
+  const age = useRef<HTMLSpanElement>(null);
+  const text = item.prompt || item.text;
+  const again = () => insertIntoComposer(text);
+  // a new session with the conversation up to just before this message, the message ready to be changed and sent
+  const fork = async () => {
+    if (!live.wid || forking) return;
+    setForking(true);
+    const s = useStore.getState();
+    try {
+      let mi = item.mi;
+      if (mi === undefined) {                           // sent since the session was opened: ask where it sits
+        const snap = await post<{ items: Item[] }>("/api/session/snapshot", { wid: live.wid });
+        const same = (x: Item) => x.kind === "user" && x.text === item.text;
+        const mine = (currentLive(s)?.items || []).filter(same);
+        const there = (snap.items || []).filter(same);
+        const found = there[there.length - (mine.length - mine.findIndex((x) => x.id === item.id))];
+        mi = found?.kind === "user" ? found.mi : undefined;
+      }
+      if (mi === undefined) throw new Error("This message is not in the saved conversation, so it cannot be forked");
+      const cwd = currentLive(s)?.cwd || "";
+      if (mi === 0) {                                   // nothing before the first message: simply a new session
+        s.setHome({ cwd, chat: false });
+        s.navigate({ kind: "home" });
+      } else {
+        const r = await post<{ sid: string; cwd: string; title: string }>("/api/session/fork", { wid: live.wid, mi: mi - 1 });
+        await s.refreshSessions();
+        const now = Date.now() / 1000;
+        await s.openSession({ id: r.sid, cwd: r.cwd, title: r.title || live.title || "", updated: now, created: now, n: 0, model: "" });
+      }
+      setTimeout(again, 80);
+    } catch (e: any) {
+      s.toast(e?.message || "Could not fork the session", "error");
+    } finally {
+      setForking(false);
+    }
+  };
+  const back = checkpoint && onRewind;
+  return (
+    <span onMouseEnter={() => refreshAge(age.current, item.at)} className="flex items-center text-text-300 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+      {item.at && <span ref={age} className="mr-[9px] text-[11px] text-text-400">{ago(item.at)}</span>}
+      {!item.queued && !item.failed && (
+        <Tip content="Fork from here: a new session up to just before this message">
+          <button aria-label="Fork from here" className={USER_BTN} disabled={!live.wid || forking} onClick={fork}><Split size={11} strokeWidth={1.9} className="rotate-90" /></button>
+        </Tip>
+      )}
+      <Tip content={back ? "Rewind: restore the files and the chat to just before this message" : "Put this message back in the box to send it again"}>
+        <button aria-label={back ? "Rewind" : "Send again"} className={USER_BTN} onClick={() => (back ? onRewind!(checkpoint!.n) : again())}><RotateCcw size={11} strokeWidth={1.9} /></button>
+      </Tip>
+      {children}
+    </span>
+  );
+}
+
 /** A reply. The copy row only follows the last reply of a turn, so text between tool calls keeps even spacing. */
 function AssistantMessage({ item, actions }: { item: Extract<Item, { kind: "assistant" }>; actions: boolean }) {
-  const [, poke] = useState(0);                         // re-render on hover so "5 minutes ago" is current
+  const age = useRef<HTMLSpanElement>(null);
   return (
-    <div className="group relative" onMouseEnter={() => poke(Date.now())}>
+    <div className="group relative" onMouseEnter={() => refreshAge(age.current, item.at)}>
       {item.spontaneous && <div className="mb-1 flex items-center gap-1 text-[11px] text-text-500"><Sparkles size={12} />said on her own</div>}
       <Markdown text={item.text} streaming={item.streaming} />
-      {!item.streaming && actions && <ReplyActions item={item} />}
+      {!item.streaming && actions && <ReplyActions item={item} ageRef={age} />}
     </div>
   );
 }
@@ -250,6 +305,13 @@ export function ago(ms: number): string {
   return d === 1 ? "yesterday" : `${d} days ago`;
 }
 
+// Scrolling can move dozens of rows under a stationary pointer. Only their time label depends on the clock.
+function refreshAge(el: HTMLSpanElement | null, at?: number) {
+  if (!el || !at) return;
+  const label = ago(at);
+  if (el.textContent !== label) el.textContent = label;
+}
+
 /** Markdown as plain words, for reading aloud: no code, no symbols, links as their text. */
 function spoken(md: string): string {
   return md.replace(/```[\s\S]*?```/g, " ").replace(/`([^`]*)`/g, "$1").replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
@@ -257,7 +319,7 @@ function spoken(md: string): string {
 }
 
 /** The row under the last reply of a turn, as in Claude Code: copy, fork from here, pin, read aloud, and when. */
-function ReplyActions({ item }: { item: Extract<Item, { kind: "assistant" }> }) {
+function ReplyActions({ item, ageRef }: { item: Extract<Item, { kind: "assistant" }>; ageRef: React.Ref<HTMLSpanElement> }) {
   const live = useLiveInfo();                                        // not the whole session: this row must not redraw on every word
   const rawPins = useStore((s) => s.settings.desktop_pinned);       // the stored value itself (a fresh [] would loop)
   const pins: string[] = Array.isArray(rawPins) ? rawPins : [];
@@ -310,7 +372,7 @@ function ReplyActions({ item }: { item: Extract<Item, { kind: "assistant" }> }) 
       <Tip content="Read aloud in Emilie's voice">
         <button aria-label="Read aloud" className={btn} disabled={!live.wid} onClick={speak}><Volume size={11} strokeWidth={1.9} /></button>
       </Tip>
-      {item.at && <span className="ml-[9px] text-[11px] text-text-400">{ago(item.at)}</span>}
+      {item.at && <span ref={ageRef} className="ml-[9px] text-[11px] text-text-400">{ago(item.at)}</span>}
     </div>
   );
 }
@@ -954,7 +1016,7 @@ export function TodoList({ todos }: { todos: Todo[] }) {
       {todos.map((t, i) => (
         <li key={i} className={cn("flex items-start gap-2 text-[12px]", t.status === "completed" ? "text-text-500" : "text-text-200")}>
           <span className="mt-[2px] shrink-0">
-            {t.status === "completed" ? <CircleCheck size={15} className="text-ok" /> : t.status === "in_progress" ? <CircleDot size={15} className="text-accent" /> : <Circle size={15} className="text-text-500" />}
+            {t.status === "completed" ? <CircleCheck size={15} className="text-ok" /> : t.status === "in_progress" ? <TodoSpinner size={15} /> : <Circle size={15} className="text-text-500" />}
           </span>
           <span className={cn(t.status === "completed" && "line-through decoration-text-500/60", t.status === "in_progress" && "font-medium text-text-100")}>
             {t.status === "in_progress" && t.activeForm ? t.activeForm : t.content}
@@ -1124,9 +1186,9 @@ function Elapsed({ since }: { since: number }) {
 /** The line at the bottom while Emilie works: the flower and a word. "Thinking" while she reasons, what she is
  *  writing while she drafts a tool call, otherwise a word that changes every few seconds. No timer or token count:
  *  the window stays quiet, the flower alone says she is busy. */
-export function Working({ since, activity, thinking, voice, voiceOn, streaming, tool, replying, group, thought }: {
+export function Working({ since, activity, thinking, voice, voiceOn, voiceClip, streaming, tool, replying, group, thought }: {
   since: number; tool?: string; replying?: boolean; tokens?: number; activity?: string | null; streaming?: boolean; thinking?: boolean;
-  voice?: "" | "replying" | "speaking"; voiceOn?: boolean;
+  voice?: "" | "replying" | "speaking"; voiceOn?: boolean; voiceClip?: VoiceClip | null;
   group?: Item[];      // the run of tool calls that is going on right now: this line is its header, with a chevron beside it
   thought?: string;    // what she is thinking right now: the chevron opens it
 }) {
@@ -1139,15 +1201,18 @@ export function Working({ since, activity, thinking, voice, voiceOn, streaming, 
   }, [ready, since]);
   if (!ready && !activity && !voice) return <div className="h-6" />;
   // With the voice on the words are held back and appear together with the voice, so the line says which step it is at:
-  // writing the reply, making the voice, then speaking (with a little level meter).
+  // writing the reply, making the voice, then speaking.
   const step = !activity && voice === "speaking" ? "Speaking" : !activity && voice === "replying" ? "Making the voice…"
     : !activity && voiceOn && streaming ? "Writing the reply…" : "";
   if (step) {
     return (
       <div className="flex h-6 items-center gap-2 text-[12px]" aria-live="polite">
-        <MarkSlot id="bloom"><Bloom mode={voice === "speaking" ? "reply" : "think"} /></MarkSlot>
-        <span key={step} className="word-in min-w-0">{voice === "speaking" ? <span className="text-text-200">{step}</span> : <Shimmer>{step}</Shimmer>}</span>
-        {voice === "speaking" && <span className="eq" aria-hidden="true"><i /><i /><i /><i /></span>}
+        <span className="inline-flex w-8 shrink-0 items-center justify-center">
+          {voice === "speaking"
+            ? voiceClip !== null && <VoiceRibbon clip={voiceClip} />
+            : <MarkSlot id="bloom"><Bloom mode={voice === "replying" ? "think" : "reply"} /></MarkSlot>}
+        </span>
+        <span key={step} className="word-in min-w-0 truncate" title={step}>{voice === "speaking" ? <span className="text-text-200">{step}</span> : <Shimmer className="truncate">{step}</Shimmer>}</span>
         <Elapsed since={since} />
       </div>
     );

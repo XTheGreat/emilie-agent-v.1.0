@@ -106,8 +106,8 @@ def build() -> list[dict]:
         # ---- you and Emilie
         {"id": "appearance", "label": "Appearance", "icon": "palette", "group": 2, "groups": [
             {"title": "", "fields": [
-                F("desktop_theme", "segmented", "Color mode", "Eveny: a deep navy, almost black.",
-                  choices=_ch(("light", "Light"), ("auto", "Auto"), ("dark", "Dark"), ("eveny", "Eveny")),
+                F("desktop_theme", "segmented", "Color mode", "Warm: light in cream. Eveny: a deep navy, almost black.",
+                  choices=_ch(("light", "Light"), ("warm", "Warm"), ("auto", "Auto"), ("dark", "Dark"), ("eveny", "Eveny")),
                   default="dark"),
                 F("desktop_font", "segmented", "Chat font",
                   choices=_ch(("default", "Default"), ("sans", "Sans"), ("system", "System"),
@@ -262,6 +262,12 @@ def apply(key: str, value) -> tuple[object, str | None]:
             return None, "permissions must be an object with allow and deny lists"
         clean = {k: [str(r).strip() for r in value.get(k) or [] if str(r).strip()][:200] for k in ("allow", "deny")}
         eff.save_settings(permissions=clean)
+        return clean, None
+    if key == "mcp_modes":                        # {server: "always" | "on_demand" | "off"} (mcp.py)
+        if not isinstance(value, dict):
+            return None, "mcp_modes must be an object"
+        clean = {str(k): v for k, v in value.items() if v in ("always", "on_demand", "off")}
+        eff.save_settings(mcp_modes=clean)
         return clean, None
     if key in HIDDEN:
         kind = HIDDEN[key]

@@ -8,7 +8,7 @@ import { cn } from "@/lib/util";
 import { BranchSm, Check, ChevD, LaptopIcon, MessageSquare, PlusSm } from "./icons";
 import { Composer, insertIntoComposer } from "./Composer";
 import { EmilieIcon } from "./EmilieIcon";
-import { ComputerChip, ContextRing, FolderChip, ModeChip, ModelEffortChip, WorktreeToggle } from "./Pickers";
+import { ContextRing, FolderChip, McpChip, ModeChip, ModelEffortChip, WorktreeToggle } from "./Pickers";
 import { Menu, MenuContent, MenuItem, MenuLabel, MenuSep, MenuTrigger, Spinner } from "./ui";
 
 const MODE_ORDER = ["ask", "trust", "plan"];
@@ -168,7 +168,7 @@ export function Home() {
           autoFocus
           footer={
             <>
-              <ComputerChip cwd={h.chat ? null : h.cwd} onPickFolder={(p) => pick(p, false)} />
+              <McpChip cwd={h.chat ? null : h.cwd} />
               <span className="w-[6px]" />
               <FolderChip cwd={h.cwd} chat={h.chat} onPick={pick} />
               <span className="w-[6px]" />

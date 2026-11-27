@@ -20,6 +20,8 @@ PRESETS: dict[str, dict] = {
                    "model": "claude-sonnet-5-5", "hint": "console.anthropic.com", "env": "ANTHROPIC_API_KEY"},
     "openai":     {"label": "OpenAI", "kind": "openai", "base": "https://api.openai.com/v1",
                    "model": "gpt-4.1", "hint": "platform.openai.com/api-keys", "env": "OPENAI_API_KEY"},
+    "freellmapi": {"label": N_('FreeLLMAPI (local router)'), "kind": "openai", "base": "http://127.0.0.1:31415/v1",
+                   "model": "auto", "hint": "FreeLLMAPI dashboard → Keys → unified API key", "env": "FREELLMAPI_API_KEY"},
     "openrouter": {"label": N_('OpenRouter (many models)'), "kind": "openai", "base": "https://openrouter.ai/api/v1",
                    "model": "openai/gpt-4o-mini", "hint": "openrouter.ai/keys", "env": "OPENROUTER_API_KEY"},
     "nvidia":     {"label": N_("NVIDIA (build.nvidia.com)"), "kind": "openai", "base": "https://integrate.api.nvidia.com/v1",

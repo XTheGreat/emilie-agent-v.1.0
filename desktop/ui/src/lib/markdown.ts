@@ -52,10 +52,11 @@ const THINK = /^\s*<think>([\s\S]*?)(<\/think>|$)/i;
 const SANITIZE = {
   ADD_ATTR: ["data-copy", "data-ext", "open"],
   FORBID_TAGS: ["style", "form", "input", "textarea", "select", "iframe", "script"],
+  RETURN_DOM_FRAGMENT: true as const,
 };
 
-/** One top-level piece of a reply (a paragraph, a list, a code block, a table, …): what it was made from, and its safe HTML. */
-export interface MdBlock { src: string; html: string }
+/** Sanitized nodes for one top-level Markdown block. They can be moved directly into the transcript. */
+export interface MdBlock { src: string; nodes: ChildNode[] }
 
 /** Markdown -> safe HTML, as its top-level pieces. <say> lines (Emilie's voice) become ♪ lines like in the terminal.
  *  `prev` is the result for an earlier text of the same reply: a piece whose source did not change is reused as it is
@@ -72,7 +73,7 @@ export function markdownBlocks(src: string, prev: readonly MdBlock[] = []): MdBl
   const out: MdBlock[] = [];
   const add = (src: string, html: () => string) => {
     const p = prev[out.length];
-    out.push(p && p.src === src ? p : { src, html: DOMPurify.sanitize(html(), SANITIZE) });
+    out.push(p && p.src === src ? p : { src, nodes: Array.from(DOMPurify.sanitize(html(), SANITIZE).childNodes) });
   };
   if (think) {
     add("\0think\0" + think, () =>
@@ -91,7 +92,11 @@ export function markdownBlocks(src: string, prev: readonly MdBlock[] = []): MdBl
 
 /** Markdown -> safe HTML (all the pieces of markdownBlocks). */
 export function renderMarkdown(src: string): string {
-  return markdownBlocks(src).map((b) => b.html).join("");
+  const template = document.createElement("template");
+  for (const block of markdownBlocks(src)) {
+    for (const node of block.nodes) template.content.appendChild(node);
+  }
+  return template.innerHTML;
 }
 
 export function highlight(code: string, ext: string): string {

@@ -14,7 +14,7 @@ type Agent = Extract<Item, { kind: "tool" }>;
 
 const clock = (s: number) => (s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`);
 
-function openInBrowser(url: string) {
+export function openInBrowser(url: string) {
   const st = useStore.getState();
   const tabs = st.paneTabs;
   useStore.setState({
@@ -23,15 +23,11 @@ function openInBrowser(url: string) {
   });
 }
 
-function Dot({ tone }: { tone: "run" | "ok" | "bad" }) {
-  return <span className={cn("h-[6px] w-[6px] shrink-0 rounded-full", tone === "run" ? "bg-accent animate-pulse" : tone === "ok" ? "bg-ok" : "bg-danger")} />;
-}
-
 // What a tool prints, coloured by what each part is: addresses, errors, warnings, success marks, numbers, "> script" lines.
 const PARTS = /(https?:\/\/[^\s"'<>)]+)|(\b(?:errors?|failed|failure|fatal|exception|traceback|ERR!)\b)|(\b(?:warn(?:ing)?s?|deprecated)\b)|([✓✔➜→]|\b(?:ready|success(?:fully)?|compiled|passed|done)\b)|(\b\d+(?:\.\d+)*(?:ms|s|kB|MB|%)?\b)/gi;
 const TONE = ["", "text-link", "text-danger", "text-warn", "text-ok", "text-accent"];
 
-function colorLine(line: string): React.ReactNode {
+export function colorLine(line: string): React.ReactNode {
   const prompt = line.match(/^(\s*[>$] )(.*)$/);                  // "> vite", "> pkg@1.0.0 dev": a command npm echoed
   if (prompt) return <><span className="text-text-500">{prompt[1]}</span><span dangerouslySetInnerHTML={{ __html: highlight(prompt[2], "bash") }} /></>;
   const out: React.ReactNode[] = [];
@@ -106,11 +102,10 @@ export function TasksPane() {
           {tasks.map((t, i) => (
             <div key={t.id} className={cn(i > 0 && "border-t border-border-200")}>
               <div role="button" onClick={() => setOpen(open === t.id ? 0 : t.id)} className="flex min-w-0 items-center gap-2 px-3 py-[7px] hover:bg-hover/50">
-                <Dot tone={t.running ? "run" : t.code === 0 ? "ok" : "bad"} />
                 <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-text-100" title={t.command}>
                   <span className="select-none text-text-500">$ </span><span dangerouslySetInnerHTML={{ __html: highlight(t.command, "bash") }} />
                 </span>
-                <span className="shrink-0 tabular-nums text-[10.5px] text-text-500">{t.running ? clock(t.seconds) : `exit ${t.code} · ${clock(t.seconds)}`}</span>
+                <span className={cn("shrink-0 tabular-nums text-[10.5px]", !t.running && t.code !== 0 ? "text-danger" : "text-text-500")}>{t.running ? clock(t.seconds) : `exit ${t.code} · ${clock(t.seconds)}`}</span>
                 {t.running && (
                   <button onClick={(e) => { e.stopPropagation(); ask({ stop: t.id }); }}
                     className="shrink-0 rounded-[5px] px-1.5 text-[10.5px] leading-[17px] text-text-300 hover:bg-danger/10 hover:text-danger">Stop</button>
@@ -118,11 +113,11 @@ export function TasksPane() {
                 <Chevron on={open === t.id} />
               </div>
               {t.url && (
-                <div className="flex min-w-0 items-center gap-2 pb-[7px] pl-[26px] pr-3 text-[11px]">
+                <div className="flex min-w-0 items-center gap-2 px-3 pb-[7px] text-[11px]">
                   <button onClick={() => openInBrowser(t.url)} title="Open in the Browser panel" className="min-w-0 truncate text-link underline-offset-2 hover:underline">{t.url}</button>
                 </div>
               )}
-              {open !== t.id && !t.url && t.last && <div className="truncate pb-[7px] pl-[26px] pr-3 font-mono text-[10.5px] text-text-500">{colorLine(t.last)}</div>}
+              {open !== t.id && !t.url && t.last && <div className="truncate px-3 pb-[7px] font-mono text-[10.5px] text-text-500">{colorLine(t.last)}</div>}
               {open === t.id && <Output text={t.output || ""} />}
             </div>
           ))}
@@ -163,9 +158,8 @@ function AgentCard({ a, on, toggle }: { a: Agent; on: boolean; toggle: () => voi
   return (
     <Card>
       <div role="button" onClick={toggle} className="flex min-w-0 items-center gap-2 px-3 py-[7px] hover:bg-hover/50">
-        <Dot tone={live ? "run" : a.status === "ok" ? "ok" : "bad"} />
         <span className={cn("min-w-0 flex-1 truncate text-text-100", live && "shimmer-text")} title={title}>{title}</span>
-        <span className="shrink-0 text-[10.5px] text-text-500">{live ? "running" : a.status === "ok" ? "done" : a.status}{steps.length ? ` · ${steps.length} steps` : ""}</span>
+        <span className={cn("shrink-0 text-[10.5px]", !live && a.status !== "ok" ? "text-danger" : "text-text-500")}>{live ? "running" : a.status === "ok" ? "done" : a.status}{steps.length ? ` · ${steps.length} steps` : ""}</span>
         <Chevron on={on} />
       </div>
       {on && (

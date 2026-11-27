@@ -7,7 +7,13 @@ import type { AppState, Folder, Item, Live, ModelRow, Request, Section, SessionM
 import { type Attachment, basename, uid } from "./util";
 import { runInApp } from "./slash";
 
-export type PaneKind = "files" | "terminal" | "browser" | "diff" | "tasks" | "checkpoints";
+export type PaneKind = "files" | "terminal" | "browser" | "diff" | "tasks" | "checkpoints" | "search" | "activity"
+  | "git" | "scripts" | "problems" | "tests" | "http" | "ports" | "notes" | "db";
+export const PANE_TITLES: Record<PaneKind, string> = {
+  files: "Files", terminal: "Terminal", browser: "Browser", diff: "Changes", tasks: "Tasks", checkpoints: "Checkpoints",
+  search: "Search", activity: "Activity", git: "Git", scripts: "Scripts", problems: "Problems", tests: "Tests",
+  http: "HTTP", ports: "Ports", notes: "Notes", db: "Database",
+};
 export interface PaneTab { key: string; kind: PaneKind | "file"; path?: string; title: string }
 
 export type SearchTab = "all" | "artifacts" | "chats" | "code" | "projects" | "scheduled";
@@ -23,7 +29,7 @@ export type Dialog =
   | { kind: "confirm"; title: string; body: string; danger?: boolean; ok?: string; resolve: (ok: boolean) => void };
 
 export interface Toast { id: string; text: string; kind: "info" | "error" | "ok" }
-export interface TermRun { tid: string; cwd: string; command: string; lines: string[]; code: number | null; at: number }
+export interface TermRun { tid: string; cwd: string; command: string; lines: string[]; code: number | null; at: number; name?: string; ended?: number }
 
 export interface HomeOpts { cwd: string | null; chat: boolean; worktree: boolean; mode: string; model: string | null; effort: string | null }
 
@@ -46,6 +52,7 @@ export interface Store {
   opening: string | null;
   pane: PaneKind | null;
   paneTabs: PaneTab[];
+  fileGo: { path: string; line: number; n: number } | null;   // the line a search result opened
   paneActive: string | null;
   paneMax: boolean;
   browserGo: { url: string; n: number } | null;       // the agent asked the Browser panel to open an address
@@ -56,6 +63,8 @@ export interface Store {
   toasts: Toast[];
   models: { rows: ModelRow[]; loading: boolean; error?: string | null; loaded: boolean };
   terms: TermRun[];
+  runs: TermRun[];                   // commands started from the Scripts panel (their output streams in like the terminal's)
+  diffGo: { commit: string; n: number } | null;     // the Git panel asked the Changes panel to show one commit
   doctor: any[];
   drafts: Record<string, string>;
 
@@ -87,7 +96,8 @@ export interface Store {
   loadModels(refresh?: boolean): Promise<void>;
   toast(text: string, kind?: Toast["kind"]): void;
   setPane(p: PaneKind | null): void;
-  openFile(path: string): void;
+  showPane(p: PaneKind): void;
+  openFile(path: string, line?: number): void;
   closeTab(key: string): void;
   activateTab(key: string): void;
   onEvent(ev: any): void;
@@ -133,9 +143,9 @@ export const useStore = create<Store>()((set, get) => {
 
   return {
     boot: "loading", bootError: "", connected: false, state: null, settings: {}, schema: null, sessions: [], folders: [],
-    scratch: "", lives: {}, view: { kind: "home" }, back: [], fwd: [], opening: null, pane: null, paneTabs: [], paneActive: null, paneMax: false, browserGo: null, envFloat: false, settingsOpen: null,
+    scratch: "", lives: {}, view: { kind: "home" }, back: [], fwd: [], opening: null, pane: null, paneTabs: [], paneActive: null, paneMax: false, fileGo: null, browserGo: null, envFloat: false, settingsOpen: null,
     dialog: null, home: { cwd: null, chat: false, worktree: false, mode: "ask", model: null, effort: null },
-    toasts: [], models: { rows: [], loading: false, loaded: false }, terms: [], doctor: [], drafts: {},
+    toasts: [], models: { rows: [], loading: false, loaded: false }, terms: [], runs: [], diffGo: null, doctor: [], drafts: {},
 
     async init() {
       try {
@@ -270,7 +280,7 @@ export const useStore = create<Store>()((set, get) => {
         applyEvents();                   // a piece of a reply that arrived before the snapshot must not be added after it again
         patch(wid, (x) => ({ ...x, items: snap.items || [], todos: snap.todos || [], request: snap.request || null,
           busy: !!snap.busy, commands: commands || x.commands, loaded: true,
-          working: snap.busy ? x.working || { since: Date.now(), tokens: 0, streaming: !!snap.stream_id } : null }));
+          working: snap.busy ? x.working || { since: Date.now(), tokens: 0, streaming: !!snap.stream_id } : x.working?.voice ? x.working : null }));
       } catch (e: any) {
         patch(wid, (x) => ({ ...x, closed: true, loaded: true }));
       }
@@ -354,7 +364,7 @@ export const useStore = create<Store>()((set, get) => {
       const images = atts.filter((a) => a.kind === "image");
       const files = atts.filter((a) => a.kind === "file" && a.path).map((a) => a.path!);
       const item: Item = { kind: "user", id: "opt-" + cid, cid, text, images: images.map((a) => a.url!).filter(Boolean),
-        files, queued: l.busy };
+        files, queued: l.busy, at: Date.now() };
       patch(wid, (x) => ({ ...x, items: [...x.items, item] }));
       try {
         await post("/api/session/send", { wid, cid, text, files, pastes,
@@ -455,10 +465,17 @@ export const useStore = create<Store>()((set, get) => {
         return set({ paneTabs: rest, paneActive: next?.key || null, pane: (next?.kind === "file" ? "files" : next?.kind as PaneKind) || null,
           paneMax: rest.length ? get().paneMax : false });
       }
-      const title = { files: "Files", terminal: "Terminal", browser: "Browser", diff: "Changes", tasks: "Tasks", checkpoints: "Checkpoints" }[p];
-      set({ paneTabs: [...tabs, { key: p, kind: p, title }], paneActive: p, pane: p });
+      set({ paneTabs: [...tabs, { key: p, kind: p, title: PANE_TITLES[p] }], paneActive: p, pane: p });
     },
-    openFile(path) {
+    showPane(p) {
+      // open it if it is not (never closes it, unlike the title bar's toggle)
+      const tabs = get().paneTabs;
+      if (tabs.some((t) => t.key === p)) return set({ paneActive: p, pane: p });
+      set({ paneTabs: [...tabs, { key: p, kind: p, title: PANE_TITLES[p] }], paneActive: p, pane: p });
+    },
+    openFile(path, line) {
+      if (line) set({ fileGo: { path, line, n: (get().fileGo?.n || 0) + 1 } });
+      else if (get().fileGo?.path === path) set({ fileGo: null });
       const key = "file:" + path;
       const tabs = get().paneTabs;
       const title = basename(path) || path;
@@ -514,15 +531,36 @@ export const useStore = create<Store>()((set, get) => {
         case "stream_start":
           patch(wid, (l) => ({ ...l, working: { ...(l.working || { since: Date.now(), tokens: 0 }), streaming: true, activity: null, voiceOn: !!ev.voice } }));
           break;
-        case "voice_phase": {                       // what the voice is doing: "" quiet, "replying" (making it), "speaking"
-          const p = (ev.phase || "") as "" | "replying" | "speaking";
+        case "voice_clip": {
+          const { levels, interval_ms: intervalMs, started_at: startedAt } = ev;
+          if (!Array.isArray(levels) || !levels.every(n => Number.isFinite(n) && n >= 0 && n <= 1)
+            || !Number.isFinite(intervalMs) || intervalMs <= 0 || !Number.isFinite(startedAt)) break;
           window.clearTimeout(voiceQuiet[wid]);
-          const apply = () => patch(wid, (l) => {
-            if (!p) return { ...l, working: l.working && !l.busy ? null : l.working ? { ...l.working, voice: "" } : null };
-            return { ...l, working: { ...(l.working || { since: Date.now(), tokens: 0, streaming: false, activity: null }), voice: p } };
+          patch(wid, (l) => {
+            if (l.closed || (l.working?.voiceClip && l.working.voiceClip.startedAt >= startedAt)) return l;
+            return { ...l, working: { ...(l.working || { since: Date.now(), tokens: 0, streaming: false }),
+              voice: "speaking", voiceClip: { levels, intervalMs, startedAt } } };
           });
-          if (p) apply();
-          else voiceQuiet[wid] = window.setTimeout(apply, 700);   // a gap between two clips must not make the status blink off
+          break;
+        }
+        case "voice_phase": {                       // "" quiet, "replying" (making it), "speaking"
+          const phase = ev.phase;
+          window.clearTimeout(voiceQuiet[wid]);
+          if (phase === "replying" || phase === "speaking") {
+            patch(wid, (l) => {
+              if (l.closed) return l;
+              const clip = phase === "speaking" ? l.working?.voiceClip ?? (ev.clip_expected ? null : undefined) : undefined;
+              return { ...l, working: { ...(l.working || { since: Date.now(), tokens: 0, streaming: false }), voice: phase, voiceClip: clip } };
+            });
+          } else {
+            // Stop the waveform immediately. Only the label lingers briefly between clips.
+            patch(wid, (l) => l.working?.voice ? { ...l, working: { ...l.working, voiceClip: null } } : l);
+            voiceQuiet[wid] = window.setTimeout(() => {
+              delete voiceQuiet[wid];
+              patch(wid, (l) => l.working?.voiceClip === null
+                ? { ...l, working: l.busy ? { ...l.working, voice: "", voiceClip: undefined } : null } : l);
+            }, 700);
+          }
           break;
         }
         case "stream_end":
@@ -589,7 +627,7 @@ export const useStore = create<Store>()((set, get) => {
         case "turn_end": {
           const l0 = get().lives[wid];
           patch(wid, (l) => ({
-            ...l, busy: false, working: l.working?.voice ? { ...l.working, streaming: false } : null,
+            ...l, busy: false, working: !ev.stopped && l.working?.voice ? { ...l.working, streaming: false } : null,
             items: l.turnTokens > 0 ? [...l.items, { kind: "turn", id: uid("turn"), secs: ev.secs, tokens: l.turnTokens, stopped: ev.stopped }] : l.items,
           }));
           if (!Object.values(get().lives).some((x) => x.busy)) bridge?.setBusy(false);
@@ -615,7 +653,7 @@ export const useStore = create<Store>()((set, get) => {
             const items = (s.items || []).map((x: any) => (x.at || !seen.get(x.id) ? x : { ...x, at: seen.get(x.id) }));
             // still working after a redraw: keep (or start) the working line, so a busy Emilie never shows no status
             return { ...l, items, todos: s.todos || [], request: s.request || null, busy: !!s.busy, loaded: true, status: ev.status || l.status,
-              working: s.busy ? l.working || { since: Date.now(), tokens: 0, streaming: !!s.stream_id } : null };
+              working: s.busy ? l.working || { since: Date.now(), tokens: 0, streaming: !!s.stream_id } : l.working?.voice ? l.working : null };
           });
           break;
         }
@@ -674,11 +712,19 @@ export const useStore = create<Store>()((set, get) => {
           get().closeSession(wid);
           break;
         case "term":
-          set({ terms: get().terms.map((r) => (r.tid === ev.tid ? { ...r, lines: [...r.lines, ev.line].slice(-4000) } : r)) });
+        case "term_end": {
+          // a terminal command or a Scripts panel run; lines that came together arrive as one event (applyEvents)
+          const add: string[] = ev.lines || (t === "term" ? [ev.line] : []);
+          const upd = (rs: TermRun[]) => (rs.some((r) => r.tid === ev.tid)
+            ? rs.map((r) => (r.tid !== ev.tid ? r : t === "term"
+              ? { ...r, lines: r.lines.length + add.length > 4000 ? [...r.lines, ...add].slice(-4000) : [...r.lines, ...add] }
+              : { ...r, code: ev.code, ended: Date.now() }))
+            : rs);
+          const terms = upd(get().terms), runs = upd(get().runs);
+          if (terms !== get().terms || runs !== get().runs) set({ terms, runs });
+          else keepOrphan(ev.tid, add, t === "term_end" ? ev.code : null);
           break;
-        case "term_end":
-          set({ terms: get().terms.map((r) => (r.tid === ev.tid ? { ...r, code: ev.code } : r)) });
-          break;
+        }
         case "doctor":
           set({ doctor: [...get().doctor, ev.row] });
           break;
@@ -693,6 +739,32 @@ export const useStore = create<Store>()((set, get) => {
 });
 
 export const currentLive = (s: Store): LiveX | null => (s.view.kind === "session" ? s.lives[s.view.wid] || null : null);
+
+// A command's first lines can arrive before the request that started it has answered (and so before its run is in the
+// store): they wait here a minute for adoptRun.
+const orphans = new Map<string, { lines: string[]; code: number | null; at: number }>();
+function keepOrphan(tid: string, lines: string[], code: number | null) {
+  const now = Date.now();
+  for (const [k, o] of orphans) if (now - o.at > 60000) orphans.delete(k);
+  const o = orphans.get(tid) || { lines: [], code: null, at: now };
+  o.lines.push(...lines);
+  if (o.lines.length > 2000) o.lines.splice(0, o.lines.length - 2000);
+  if (code !== null && code !== undefined) o.code = code;
+  orphans.set(tid, o);
+}
+
+/** Add a Scripts panel run to the store, with whatever it already printed. */
+export function adoptRun(run: TermRun): void {
+  const o = orphans.get(run.tid);
+  orphans.delete(run.tid);
+  const r: TermRun = o ? { ...run, lines: [...o.lines, ...run.lines], code: o.code ?? run.code, ended: o.code !== null ? Date.now() : run.ended } : run;
+  const rest = useStore.getState().runs.filter((x) => x.tid !== run.tid);
+  const keep = [r, ...rest];
+  const done = keep.filter((x) => x.code !== null);
+  // the finished ones beyond the 25 newest go; running ones always stay
+  const drop = new Set(done.slice(25).map((x) => x.tid));
+  useStore.setState({ runs: keep.filter((x) => !drop.has(x.tid)) });
+}
 
 export interface LiveInfo { wid: string | null; sid: string | null; cwd: string; title: string; closed: boolean; hasItems: boolean }
 
@@ -734,6 +806,11 @@ function applyEvents(): void {
       let text = ev.text;
       while (batch[i + 1]?.t === "delta" && batch[i + 1].wid === ev.wid && batch[i + 1].id === ev.id) text += batch[++i].text;
       if (text !== ev.text) ev = { ...ev, text };
+    } else if (ev?.t === "term" && batch[i + 1]?.t === "term" && batch[i + 1].tid === ev.tid) {
+      // a chatty command (a dev server, a build) prints many lines a frame: add them in one go
+      const lines = [ev.line];
+      while (batch[i + 1]?.t === "term" && batch[i + 1].tid === ev.tid) lines.push(batch[++i].line);
+      ev = { ...ev, lines };
     }
     try {
       onEvent(ev);

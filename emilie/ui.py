@@ -15,10 +15,11 @@ from .i18n import t as tr_, N_
 from .theme import ADD, DEL, ERR, LAV, MUTED, OK, ROSE, WARN
 
 LABELS = {"bash": "Bash", "bash_bg": "Bash(bg)", "bg_output": "BgOutput", "bg_stop": "BgStop", "write_file": "Write", "edit_file": "Update",
-          "read_file": "Read", "grep": "Search", "glob": "Glob", "web_fetch": "Fetch", "web_search": "WebSearch", "task": "Task", "tasks": "Tasks", "exit_plan_mode": "Plan",
+          "read_file": "Read", "grep": "Search", "glob": "Glob", "web_fetch": "Fetch", "read_page": "Read page", "web_search": "WebSearch", "task": "Task", "tasks": "Tasks", "exit_plan_mode": "Plan",
           "todo_write": "Todos", "use_skill": "Skill",
           "notebook_edit": "Notebook", "notebook_run": "NotebookRun", "docx_read": "Docx", "docx_edit": "DocxEdit",
-          "docx_create": "DocxNew", "xlsx_read": "Xlsx", "xlsx_write": "XlsxEdit", "pptx_read": "Pptx"}
+          "docx_create": "DocxNew", "xlsx_read": "Xlsx", "xlsx_write": "XlsxEdit", "pptx_read": "Pptx",
+          "render_diagram": "Diagram", "render_drawio": "Draw.io"}
 
 
 def label(name: str) -> str:
@@ -40,10 +41,14 @@ def _target(name: str, args: dict) -> str:
         return f"task {args.get('id') or 'all'}"
     if name in {"grep", "glob"}:
         return f"{args.get('pattern', '')}  {args.get('path', '')}".strip()
-    if name == "web_fetch":
+    if name in ("web_fetch", "read_page"):
         return args.get("url", "")
     if name == "web_search":
         return args.get("query", "")
+    if name == "render_drawio":
+        return args.get("filename", "")
+    if name == "render_diagram":
+        return f"{args.get('kind', '')} {args.get('filename', '')}".strip()
     if name == "task":
         return args.get("description", "")
     if name == "tasks":
@@ -69,17 +74,20 @@ def tool_header(console: Console, name: str, args: dict) -> None:
 
 def tool_result(console: Console, name: str, out: str, dt: float | None = None) -> None:
     lines = out.splitlines() or [""]
-    err = out.startswith("ERROR") or (name == "bash" and not out.startswith("exit=0"))
-    if name == "read_file" and not err:
+    err = out.startswith("ERROR") or (name == "bash" and not out.startswith("exit=0")) \
+        or (name in ("render_diagram", "render_drawio") and '{"ok": false' in out)
+    if name in ("render_diagram", "render_drawio"):
+        summary = [_one_line(l, 140) for l in lines[:1]]
+    elif name == "read_file" and not err:
         n = sum(1 for l in lines if re.match(r"\s*\d+\t", l))
         summary = ([tr_('Read {n} lines', n=n) + (" (partial)" if any(l.startswith("...[lines") for l in lines) else "")]
                    if n else [_one_line(lines[0], 80)])      # PDF, notebook, image: not a numbered text file
     elif name == "glob":
         summary = ["no files" if lines == ["no matches"] else f"{len(lines)} file"]
-    elif name == "web_fetch" and not err:
+    elif name in ("web_fetch", "read_page") and not err:
         summary = [tr_('Fetched {0} characters', len(out))]
     elif name == "web_search" and not err:
-        summary = [tr_('{0} results', sum(1 for l in lines if re.match(r"\d+\. ", l)))]
+        summary = [tr_('{0} results', sum(1 for l in lines if re.match(r"\[\d+\] ", l)))]
     elif name == "todo_write":
         summary = lines[:1]
     elif name in {"write_file", "edit_file"}:

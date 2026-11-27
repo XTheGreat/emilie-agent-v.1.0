@@ -346,7 +346,7 @@ function Preview({ r }: { r: Artifact }) {
   }, [seen]);
   const dark = k === "code" || k === "web" || k === "notebook" || k === "slides";
   const paper = cn("absolute inset-x-[22px] bottom-0 top-[19px] overflow-hidden rounded-t-[4px] shadow-[0_1px_8px_rgb(0_0_0/0.35)]",
-    dark ? "bg-[#1c1c1c] text-[#d4d4d4]" : "bg-[#f4f2ed] text-[#2b2b2b]");
+    dark ? "bg-[#1c1c1c] text-[#d4d4d4]" : "bg-bg-200 text-text-100");
   if (k === "image") {
     return (
       <div ref={ref} className={cn(paper, "bg-bg-300")}>

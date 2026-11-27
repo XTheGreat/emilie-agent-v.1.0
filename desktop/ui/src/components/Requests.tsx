@@ -2,7 +2,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { Request, Todo } from "@/lib/types";
 import { basename, cn } from "@/lib/util";
-import { Alert, ChevronRight, CircleCheck, CircleDashed, CircleEllipsis, ListTodo, Shield } from "./icons";
+import { currentLive, useStore } from "@/lib/store";
+import { Alert, ChevronRight, CircleCheck, CircleDashed, ListTodo, Shield } from "./icons";
 import { DiffView, Markdown, TodoList } from "./Transcript";
 import { Button, Kbd, Modal } from "./ui";
 
@@ -134,6 +135,14 @@ export function ChooseDialog({ req, onAnswer }: { req: Extract<Request, { kind: 
   );
 }
 
+/** The mark of the task being worked on: a spinning ring. It holds still while Emilie is not busy. */
+export function TodoSpinner({ size }: { size: number }) {
+  const busy = useStore((st) => !!currentLive(st)?.busy);
+  return (
+    <span aria-label="In progress" className={cn("todo-spin text-text-400", busy && "on")} style={{ width: size - 2, height: size - 2, margin: 1 }} />
+  );
+}
+
 /** Emilie's task list, as in Claude Code: part of the conversation, right under the latest message (not a box pinned
  *  over the message box). A quiet bordered box; the current task in white with a ··· circle, the next ones grey with a
  *  dashed circle, finished ones ticked and struck through. Once everything is done it folds to one line. */
@@ -158,7 +167,7 @@ export function TaskList({ todos }: { todos: Todo[] }) {
             <li key={i} className={cn("flex items-start gap-[9px]",
               t.status === "in_progress" ? "text-text-100" : t.status === "completed" ? "text-text-500" : "text-text-400")}>
               <span className="mt-[3.5px] shrink-0">
-                {t.status === "completed" ? <CircleCheck size={14} /> : t.status === "in_progress" ? <CircleEllipsis size={14} /> : <CircleDashed size={14} />}
+                {t.status === "completed" ? <CircleCheck size={14} /> : t.status === "in_progress" ? <TodoSpinner size={14} /> : <CircleDashed size={14} />}
               </span>
               <span className={cn("min-w-0", t.status === "completed" && "line-through decoration-text-500/60")}>{t.content}</span>
             </li>

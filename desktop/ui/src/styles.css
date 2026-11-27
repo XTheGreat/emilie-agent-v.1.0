@@ -83,6 +83,48 @@
   --col-w: 585px;                /* the message box and the conversation column (Claude Code's width) */
   color-scheme: light;
 }
+/* light = clean white and neutral greys, like Claude Code's light mode. The warm cream palette above is the "Warm"
+   theme (classes "light warm"). Accent colours are not set here, so the accent choice keeps working. */
+.light:not(.warm) {
+  --bg-100: #ffffff;
+  --bg-200: #fafafa;
+  --bg-300: #f4f4f4;
+  --bg-400: #ebebeb;
+  --text-000: #141414;
+  --text-100: #141414;
+  --text-200: #3b3b3b;
+  --text-300: #3b3b3b;
+  --text-400: #707070;
+  --text-500: #8f8f8f;
+  --border-100: rgb(0 0 0 / 0.07);
+  --border-200: rgb(0 0 0 / 0.1);
+  --border-300: rgb(0 0 0 / 0.13);
+  --border-400: rgb(0 0 0 / 0.28);
+  --changes-bg: #f7f7f7;
+  --code-bg: #f7f7f7;
+  --hover: rgb(0 0 0 / 0.045);
+  --active: rgb(0 0 0 / 0.08);
+  --dropdown-sep: rgb(0 0 0 / 0.1);
+  --tab-on: rgb(0 0 0 / 0.07);
+  --card-fill: rgb(0 0 0 / 0.025);
+  --card-line: rgb(0 0 0 / 0.11);
+  --thumb-bg: #efefef;
+  --btn-solid: #141414;
+  --pal-border: rgb(0 0 0 / 0.16);
+  --pal-sep: rgb(0 0 0 / 0.09);
+  --pal-hi: rgb(0 0 0 / 0.06);
+  --pal-row: #3b3b3b;
+  --pal-kbd: rgb(0 0 0 / 0.22);
+  --chart-grid: #e8e8e8;
+  --chart-axis: #cccccc;
+  --user-bubble: #f2f2f2;
+  --seg-bg: #efefef;
+  --card-border: rgb(0 0 0 / 0.11);
+  --composer-border: rgb(0 0 0 / 0.15);
+  --divider: rgb(0 0 0 / 0.09);
+  --shadow-lg: 0 10px 38px -10px rgb(0 0 0 / 0.2), 0 10px 20px -15px rgb(0 0 0 / 0.18);
+  --scroll: rgb(0 0 0 / 0.17);
+}
 /* dark = the Claude Code desktop palette, measured from the real app: neutral greys, not warm */
 .dark {
   --bg-000: #303030;
@@ -315,6 +357,18 @@ button { cursor: default; }
   animation: shimmer 2.4s linear infinite;
 }
 .item-in { animation: var(--animate-fade-in); }
+/* Keep the scrolling transcript on a compositor layer beneath the stationary composer. */
+.chat-scroll { transform: translateZ(0); }
+/* buttons that stand out by taking the other theme's background: dark ones on light, light ones on dark;
+   Eveny's navy has them in its accent (which follows the lavender choice) */
+.btn-contrast { background: #191919; color: #ffffff; }
+.dark .btn-contrast { background: #faf9f5; color: #141413; }
+.eveny .btn-contrast { background: var(--accent); color: #ffffff; }
+.eveny.accent-lavender .btn-contrast { color: #141413; }
+.btn-contrast:hover:not(:disabled) { filter: brightness(1.18); }
+.dark .btn-contrast:hover:not(:disabled) { filter: brightness(.88); }
+.eveny .btn-contrast:hover:not(:disabled) { filter: brightness(1.12); }
+.btn-contrast:disabled { opacity: .4; }
 .cv-auto { content-visibility: auto; contain-intrinsic-size: auto 120px; }
 /* each new working word slides in softly, with a little spring */
 .word-in { display: inline-block; animation: word-in .5s var(--mk-soft); }
@@ -324,6 +378,11 @@ button { cursor: default; }
 @media (prefers-reduced-motion: reduce) {
   .word-in, .flash { animation: none !important; }
 }
+/* the task in progress: a turning ring in the grey of the other circles (transform only, so it stays cheap) */
+.todo-spin { display: block; border-radius: 50%; border: 1.5px solid color-mix(in srgb, currentColor 25%, transparent); border-top-color: currentColor; border-right-color: currentColor; }
+.todo-spin.on { animation: todo-turn .9s linear infinite; }
+@keyframes todo-turn { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .todo-spin { animation: none !important; } }
 /* long titles fade out at the right edge (the Claude sidebar does not use '…') */
 .fade-r { overflow: hidden; white-space: nowrap; -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent); }
 
@@ -429,462 +488,120 @@ button { cursor: default; }
 .code-view .gutter .cur { color: var(--text-000); }
 }
 
-/* the little level meter beside "Speaking" */
-.eq { display: inline-flex; height: 12px; align-items: flex-end; gap: 2px; }
-.eq i { display: block; width: 2px; height: 100%; border-radius: 1px; background: currentColor; transform-origin: bottom; animation: eq-bar .9s ease-in-out infinite; }
-.eq i:nth-child(2) { animation-delay: -.3s; animation-duration: .7s; }
-.eq i:nth-child(3) { animation-delay: -.6s; animation-duration: 1.1s; }
-.eq i:nth-child(4) { animation-delay: -.15s; animation-duration: .8s; }
-@keyframes eq-bar { 0%, 100% { transform: scaleY(.25); } 30% { transform: scaleY(1.05); } 42% { transform: scaleY(.8); } 54% { transform: scaleY(.95); } 72% { transform: scaleY(.45); } }
-@media (prefers-reduced-motion: reduce) { .eq i { animation: none; transform: scaleY(.6); } }
+.voice-ribbon { display: inline-flex; width: 32px; height: 22px; }
+.voice-ribbon-envelope {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+}
+.voice-ribbon-envelope i {
+  width: 3px;
+  border-radius: 999px;
+  background: currentColor;
+  animation: voice-bar .92s ease-in-out infinite alternate;
+}
+.voice-ribbon-envelope i:first-child, .voice-ribbon-envelope i:last-child { opacity: .75; }
+.voice-ribbon[data-measured] .voice-ribbon-envelope { transform: scaleY(.06); }
+@keyframes voice-bar {
+  0% { transform: scaleY(.55); }
+  48% { transform: scaleY(1); }
+  100% { transform: scaleY(.76); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .voice-ribbon-envelope i { animation: none; }
+  .voice-ribbon[data-measured] .voice-ribbon-envelope { transform: none; }
+}
 
 /* while a splitter / panel is dragged, a page inside a panel must not take the mouse (it would swallow the release) */
 body.dragging webview, body.dragging iframe { pointer-events: none !important; }
+.dock-ease {
+  transition-property: left, top, width, height;
+  transition-duration: .16s;
+  transition-timing-function: cubic-bezier(.2,.8,.2,1);
+}
+@media (prefers-reduced-motion: reduce) { .dock-ease { transition: none; } }
 
-/* ------------------------------------------------------------------ working marks (components/WorkMarks.tsx)
-   One 20×20 box for every mark (its font-size; parts are placed in em). Every part is a layer as big as the box whose
-   drawing sits at its place in the 20-unit grid, so transform-origin (x*5)% (y*5)% is the point (x, y) and u units are
-   u*0.05em. Parts only move (transform) and fade (opacity): the GPU runs that on its own, so the marks stay smooth while
-   the page is busy. The rubber is squash and stretch (x and y scaled in turn), overshoot and settle, and parts that lag
-   behind the body (an antenna, a cord). Every loop ends exactly where it starts, so nothing ever hitches. */
+/* Status marks share the transcript's 24px line height. The SVG stays mounted
+   while the label streams or the flower changes mood. */
 :root {
-  /* springs (a damped spring sampled into linear()): soft overshoots 8%, spring 20% */
   --mk-soft: linear(0, 0.025 2.2%, 0.11 5%, 0.292 9%, 0.652 16.2%, 0.824 20.5%, 0.949 24.8%, 1.032 29.2%, 1.075 34.2%, 1.08 41%, 1.003 63.7%, 0.995 85.5%, 1);
-  --mk-spring: linear(0, 0.022 1.5%, 0.095 3.2%, 0.24 5.5%, 0.777 12.2%, 0.957 15%, 1.079 17.5%, 1.158 20%, 1.2 22.8%, 1.2 26%, 1.142 30.8%, 1.01 39.2%, 0.965 45%, 0.963 52.2%, 1.007 69.5%, 1);
 }
-.mk { position: relative; display: inline-block; flex: none; width: 1em; height: 1em; font-size: 20px; line-height: 0; color: #86a595; }
-.accent-lavender .mk { color: color-mix(in srgb, var(--accent) 78%, white); }
-.mk .p { position: absolute; inset: 0; display: block; }
-.mk svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; fill: none; stroke: currentColor; stroke-width: 1.25; stroke-linecap: round; stroke-linejoin: round; }
-.mk .f { fill: currentColor; stroke: none; }
-.mk .t { fill: currentColor; fill-opacity: .16; }
-.mk .dim { opacity: .42; }
-.mk .fx { opacity: 0; }                 /* shown only by its animation (so it stays hidden when motion is reduced) */
-@keyframes mk-turn { to { transform: rotate(360deg); } }
+.activity-mark, .voice-ribbon { color: #427c68; }
+.dark :is(.activity-mark, .voice-ribbon) { color: #9acfaf; }
+.accent-lavender :is(.activity-mark, .voice-ribbon) { color: var(--accent); }
+.activity-mark {
+  display: inline-block;
+  flex: none;
+  width: 1em;
+  height: 1em;
+  font-size: 24px;
+  line-height: 0;
+  --bl-pollen-color: #a36b18;
+}
+.dark .activity-mark { --bl-pollen-color: #f5cc78; }
+.workmark { display: block; width: 100%; height: 100%; }
 
-/* the place of the mark: a new kind of work pops in with a spring while the old one shrinks away */
-.mk-slot { position: relative; display: inline-block; flex: none; width: 20px; height: 20px; }
-.mk-slot > span { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
-.mk-slot > .mk-in { animation: mk-in .62s var(--mk-spring) both; }
-.mk-slot > .mk-out { animation: mk-out .2s cubic-bezier(.55, 0, .8, .35) both; }
-@keyframes mk-in { from { opacity: 0; transform: scale(.3) rotate(-35deg); } to { opacity: 1; transform: scale(1) rotate(0deg); } }
-@keyframes mk-out { from { opacity: 1; transform: scale(1) rotate(0deg); } to { opacity: 0; transform: scale(.35) rotate(30deg); } }
+.mk-slot { position: relative; display: inline-block; flex: none; width: 24px; height: 24px; }
+.mk-slot > span { position: absolute; inset: 0; display: grid; place-items: center; }
+.mk-slot > .mk-in { animation: mk-in .38s var(--mk-soft) both; }
+.mk-slot > .mk-out { animation: mk-out .18s ease-in both; }
+@keyframes mk-in {
+  from { opacity: 0; transform: translateY(2px) scale(.78) rotate(-8deg); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes mk-out { to { opacity: 0; transform: translateY(-2px) scale(.76) rotate(5deg); } }
 
-/* ---- the flower: the turn is the same in every mood (a change of mood never makes it jump) ---- */
-.bl-turn { animation: mk-turn 12s linear infinite; }
-.bl-think { --bl-a: bl-ripple; --bl-d: 1.6s; }
-.bl-wait { --bl-a: bl-sweep; --bl-d: 2.6s; }
-.bl-reply { --bl-a: bl-ripple; --bl-d: .95s; animation: bl-jelly .95s cubic-bezier(.45, 0, .55, 1) infinite; }
-/* petal i runs i fifths of a beat behind the one before it, so the wave goes round the way the flower turns */
-.bl-petal { animation: var(--bl-a, bl-ripple) var(--bl-d, 1.6s) infinite; animation-delay: calc(var(--i) * var(--bl-d, 1.6s) / 5 - var(--bl-d, 1.6s)); }
-.bl-core { animation: bl-beat var(--bl-d, 1.6s) infinite; }
-@keyframes bl-ripple {               /* stretch out like rubber, snap back, wobble, settle, rest */
-  0%   { transform: scale(.8, .72); opacity: .4; animation-timing-function: cubic-bezier(.2, .7, .3, 1); }
-  15%  { transform: scale(1.02, 1.24); opacity: 1; animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  27%  { transform: scale(1.1, .9); opacity: .95; animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  38%  { transform: scale(.97, 1.07); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  49%  { transform: scale(1.02, .98); opacity: .85; animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  70%  { transform: scale(.86, .8); opacity: .55; animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  100% { transform: scale(.8, .72); opacity: .4; }
+/* Keep the slow rotation on its own layer so changes of mood preserve its phase. */
+.bl-body, .bl-heart, .bl-orbit, .bl-turn { transform-origin: 12px 12px; }
+.bl-turn { animation: bl-turn 18s linear infinite; }
+.bl-fold { fill: var(--bg-100); opacity: .54; }
+.bl-heart { fill: var(--bl-pollen-color); }
+.bl-wait { --bl-motion: bl-unfurl; --bl-beat: 3.2s; }
+.bl-think { --bl-motion: bl-ripple; --bl-beat: 1.9s; }
+.bl-reply { --bl-motion: bl-ripple; --bl-beat: 1.06s; }
+.bl-petal {
+  transform-origin: 12px 10.6px;
+  animation: var(--bl-motion) var(--bl-beat) ease-in-out infinite;
+  animation-delay: calc((var(--i) / 5 - 1) * var(--bl-beat));
 }
-@keyframes bl-sweep {                /* one petal at a time wakes, stretches, wobbles and dozes off */
-  0%, 100% { transform: scale(.84, .8); opacity: .26; animation-timing-function: cubic-bezier(.2, .7, .3, 1); }
-  9%   { transform: scale(1, 1.18); opacity: .95; animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  18%  { transform: scale(1.06, .93); opacity: .85; animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  27%  { transform: scale(.98, 1.04); opacity: .62; animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  44%  { transform: scale(.84, .8); opacity: .26; }
-}
-@keyframes bl-beat {                 /* the heart beats once per round, and bounces */
-  0%, 100% { transform: scale(1); animation-timing-function: cubic-bezier(.2, .7, .3, 1); }
-  14% { transform: scale(1.4); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  28% { transform: scale(.86); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  42% { transform: scale(1.1); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  56% { transform: scale(1); }
-}
-@keyframes bl-jelly { 0%, 100% { transform: scale(1, 1); } 20% { transform: scale(1.07, .93); } 42% { transform: scale(.95, 1.05); } 62% { transform: scale(1.02, .98); } 80% { transform: scale(1, 1); } }
+.bl-orbit { animation: bl-turn var(--bl-beat) linear infinite; }
+.bl-reply .bl-body { animation: bl-bounce var(--bl-beat) ease-in-out infinite; }
+.bl-reply .bl-heart { animation: bl-heartbeat var(--bl-beat) ease-out infinite; }
+.bl-pollen { opacity: 0; fill: var(--bl-pollen-color); transform-origin: 20px 4px; animation: bl-puff var(--bl-beat) ease-out infinite; }
 
-/* ---- pencil (writing a file); the scene sits a little higher so it is centred in the box ---- */
-.mk-write { transform: translateY(-.06em); }
-.wr-pen { transform-origin: 12% 77%; animation: wr-pen 2.6s cubic-bezier(.45, 0, .55, 1) infinite; }
-.wr-ink { animation-duration: 2.6s; animation-iteration-count: infinite; animation-timing-function: linear; }
-.wr-i1 { transform-origin: 14.5% 75%; animation-name: wr-i1; }
-.wr-i2 { transform-origin: 25.5% 72%; animation-name: wr-i2; }
-.wr-i3 { transform-origin: 36.5% 72%; animation-name: wr-i3; }
-.wr-i4 { transform-origin: 47.5% 72%; animation-name: wr-i4; }
-.wr-dot { transform-origin: 68% 76.75%; animation: wr-dot 2.6s infinite; }
-@keyframes wr-pen {
-  0%    { transform: translate(0, -.13em) rotate(-16deg) scale(1, 1); animation-timing-function: cubic-bezier(.55, 0, .85, .3); }
-  7%    { transform: translate(0, .012em) rotate(3deg) scale(1.06, .9); animation-timing-function: cubic-bezier(.3, .7, .4, 1); }
-  11%   { transform: translate(.025em, -.02em) rotate(-2deg) scale(1, 1); }
-  15%   { transform: translate(.08em, .01em) rotate(3deg) scale(1, 1); }
-  19.5% { transform: translate(.135em, -.05em) rotate(-3deg) scale(1, 1); }
-  24%   { transform: translate(.19em, .01em) rotate(3deg) scale(1, 1); }
-  28.5% { transform: translate(.245em, -.05em) rotate(-3deg) scale(1, 1); }
-  33%   { transform: translate(.3em, .01em) rotate(3deg) scale(1, 1); }
-  37.5% { transform: translate(.355em, -.05em) rotate(-3deg) scale(1, 1); }
-  42%   { transform: translate(.41em, .01em) rotate(3deg) scale(1, 1); }
-  46.5% { transform: translate(.465em, -.05em) rotate(-3deg) scale(1, 1); }
-  51%   { transform: translate(.49em, 0) rotate(0deg) scale(1, 1); animation-timing-function: cubic-bezier(.3, .7, .4, 1); }
-  57%   { transform: translate(.54em, -.08em) rotate(-10deg) scale(1, 1); animation-timing-function: cubic-bezier(.55, 0, .85, .3); }
-  61%   { transform: translate(.56em, .005em) rotate(4deg) scale(1.05, .92); animation-timing-function: cubic-bezier(.3, .7, .4, 1); }
-  66%   { transform: translate(.52em, -.13em) rotate(-16deg) scale(1, 1); animation-timing-function: linear(0, 0.022 1.5%, 0.095 3.2%, 0.24 5.5%, 0.777 12.2%, 0.957 15%, 1.079 17.5%, 1.158 20%, 1.2 22.8%, 1.2 26%, 1.142 30.8%, 1.01 39.2%, 0.965 45%, 0.963 52.2%, 1.007 69.5%, 1); }
-  100%  { transform: translate(0, -.13em) rotate(-16deg) scale(1, 1); }
+@keyframes bl-turn { to { transform: rotate(360deg); } }
+@keyframes bl-unfurl {
+  0%, 74%, 100% { transform: rotate(-10deg) scale(.76, .63); opacity: .55; }
+  18% { transform: rotate(5deg) scale(1.05, 1.12); opacity: 1; }
+  34% { transform: rotate(1deg) scale(1, .99); opacity: .95; }
 }
-/* each wave of ink grows from its left end as the pencil draws it, wobbles into shape, and all of it fades together */
-@keyframes wr-i1 {
-  0%, 11% { opacity: 0; transform: scale(.05, 1); }
-  11.5% { opacity: 1; transform: scale(.05, 1); }
-  19.5% { transform: scale(1.06, .82); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  23% { transform: scale(.98, 1.08); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  26% { transform: scale(1, 1); }
-  66% { opacity: 1; transform: scale(1, 1); animation-timing-function: cubic-bezier(.55, 0, .8, .35); }
-  78% { opacity: 0; transform: scale(.96, .3); }
-  100% { opacity: 0; transform: scale(.05, 1); }
+@keyframes bl-ripple {
+  0%, 78%, 100% { transform: rotate(-6deg) scale(.94, .83); opacity: .76; }
+  22% { transform: rotate(7deg) scale(.96, 1.1); opacity: 1; }
+  43% { transform: rotate(-2deg) scale(1.07, .94); opacity: .96; }
 }
-@keyframes wr-i2 {
-  0%, 19.5% { opacity: 0; transform: scale(.05, 1); }
-  20% { opacity: 1; transform: scale(.05, 1); }
-  28.5% { transform: scale(1.06, .82); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  32% { transform: scale(.98, 1.08); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  35% { transform: scale(1, 1); }
-  66% { opacity: 1; transform: scale(1, 1); animation-timing-function: cubic-bezier(.55, 0, .8, .35); }
-  78% { opacity: 0; transform: scale(.96, .3); }
-  100% { opacity: 0; transform: scale(.05, 1); }
+@keyframes bl-bounce {
+  0%, 80%, 100% { transform: none; }
+  14% { transform: translateY(.65px) rotate(-5deg) scale(1.07, .91); }
+  34% { transform: translateY(-.7px) rotate(4deg) scale(.95, 1.06); }
+  54% { transform: rotate(-2deg) scale(1.02, .98); }
 }
-@keyframes wr-i3 {
-  0%, 28.5% { opacity: 0; transform: scale(.05, 1); }
-  29% { opacity: 1; transform: scale(.05, 1); }
-  37.5% { transform: scale(1.06, .82); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  41% { transform: scale(.98, 1.08); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  44% { transform: scale(1, 1); }
-  66% { opacity: 1; transform: scale(1, 1); animation-timing-function: cubic-bezier(.55, 0, .8, .35); }
-  78% { opacity: 0; transform: scale(.96, .3); }
-  100% { opacity: 0; transform: scale(.05, 1); }
+@keyframes bl-heartbeat {
+  0%, 65%, 100% { transform: scale(1); }
+  32% { transform: scale(1.18); }
 }
-@keyframes wr-i4 {
-  0%, 37.5% { opacity: 0; transform: scale(.05, 1); }
-  38% { opacity: 1; transform: scale(.05, 1); }
-  51% { transform: scale(1.05, .84); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  54.5% { transform: scale(.98, 1.08); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  57.5% { transform: scale(1, 1); }
-  66% { opacity: 1; transform: scale(1, 1); animation-timing-function: cubic-bezier(.55, 0, .8, .35); }
-  78% { opacity: 0; transform: scale(.96, .3); }
-  100% { opacity: 0; transform: scale(.05, 1); }
-}
-@keyframes wr-dot {                  /* the full stop it taps at the end */
-  0%, 60% { opacity: 0; transform: scale(0); }
-  61.5% { opacity: 1; transform: scale(1.7); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  64.5% { transform: scale(.75); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  67.5% { transform: scale(1.15); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  70.5% { opacity: 1; transform: scale(1); animation-timing-function: cubic-bezier(.55, 0, .8, .35); }
-  78% { opacity: 0; transform: scale(.6); }
-  100% { opacity: 0; transform: scale(0); }
+@keyframes bl-puff {
+  0%, 18%, 75%, 100% { opacity: 0; }
+  18% { transform: translate(-2px, 2px) scale(.55); }
+  35% { opacity: 1; transform: scale(1); }
+  70%, 100% { transform: translate(.7px, -.65px) scale(.8); }
 }
 
-/* ---- globe (on the web) ---- */
-.gl-body { animation: gl-jelly 3.2s cubic-bezier(.45, 0, .55, 1) infinite; }
-.gl-mer { animation: gl-mer 4s linear infinite; animation-delay: calc(var(--k) * -1s); }
-.gl-path { opacity: .2; }
-.gl-orbit { transform: rotate(-20deg); }
-.gl-ox { animation: gl-ox 1.6s cubic-bezier(.37, 0, .63, 1) infinite alternate; }
-.gl-oy { animation: gl-oy 1.6s cubic-bezier(.37, 0, .63, 1) infinite alternate; animation-delay: -.8s; }
-/* a meridian is the right half of the outline, squeezed by the sine of its longitude: it sweeps from the left edge to
-   the right one in front, then back, faint, behind; four of them a quarter turn apart */
-@keyframes gl-mer {
-  0%     { transform: scaleX(-1); opacity: .85; }
-  8.33%  { transform: scaleX(-.866); }
-  16.67% { transform: scaleX(-.5); }
-  25%    { transform: scaleX(.02); opacity: 1; }
-  33.33% { transform: scaleX(.5); }
-  41.67% { transform: scaleX(.866); }
-  49%    { opacity: .85; }
-  50%    { transform: scaleX(1); }
-  54%    { opacity: .12; }
-  58.33% { transform: scaleX(.866); }
-  66.67% { transform: scaleX(.5); }
-  75%    { transform: scaleX(.02); }
-  83.33% { transform: scaleX(-.5); }
-  91.67% { transform: scaleX(-.866); }
-  96%    { opacity: .12; }
-  100%   { transform: scaleX(-1); opacity: .85; }
-}
-@keyframes gl-ox { from { transform: translateX(-.46em); } to { transform: translateX(.46em); } }
-@keyframes gl-oy { from { transform: translateY(-.145em) scale(.7); opacity: .3; } to { transform: translateY(.145em) scale(1.2); opacity: 1; } }
-@keyframes gl-jelly { 0%, 100% { transform: scale(1, 1); } 25% { transform: scale(1.035, .965); } 50% { transform: scale(.975, 1.025); } 75% { transform: scale(1.012, .988); } }
-
-/* ---- pliers / tang (using a tool): the arms turn about the pivot (10, 8.6), the yank turns everything about the nut ---- */
-.tg-wig { transform-origin: 50% 14.25%; animation: tg-wig 2.2s cubic-bezier(.45, 0, .55, 1) infinite; }
-.tg-arm { transform-origin: 50% 43%; animation-duration: 2.2s; animation-iteration-count: infinite; animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-.tg-l { animation-name: tg-l; }
-.tg-r { animation-name: tg-r; }
-.tg-nut { transform-origin: 50% 14.25%; animation: tg-nut 2.2s cubic-bezier(.45, 0, .55, 1) infinite; }
-@keyframes tg-l {
-  0%, 12% { transform: rotate(3deg); animation-timing-function: cubic-bezier(.55, 0, .85, .3); }
-  20% { transform: rotate(-6.5deg); }
-  25% { transform: rotate(-3deg); }
-  29% { transform: rotate(-4.6deg); }
-  33%, 58% { transform: rotate(-4deg); animation-timing-function: cubic-bezier(.3, .7, .4, 1); }
-  64% { transform: rotate(6deg); }
-  70% { transform: rotate(1.8deg); }
-  76% { transform: rotate(3.6deg); }
-  82%, 100% { transform: rotate(3deg); }
-}
-@keyframes tg-r {
-  0%, 12% { transform: rotate(-3deg); animation-timing-function: cubic-bezier(.55, 0, .85, .3); }
-  20% { transform: rotate(6.5deg); }
-  25% { transform: rotate(3deg); }
-  29% { transform: rotate(4.6deg); }
-  33%, 58% { transform: rotate(4deg); animation-timing-function: cubic-bezier(.3, .7, .4, 1); }
-  64% { transform: rotate(-6deg); }
-  70% { transform: rotate(-1.8deg); }
-  76% { transform: rotate(-3.6deg); }
-  82%, 100% { transform: rotate(-3deg); }
-}
-@keyframes tg-nut {                  /* bitten: squashes like rubber; let go: bounces back into shape */
-  0%, 14% { transform: scale(1, 1); }
-  20% { transform: scale(.7, 1.24); }
-  25% { transform: scale(.86, 1.08); }
-  29% { transform: scale(.78, 1.16); }
-  33%, 58% { transform: scale(.8, 1.14); }
-  63% { transform: scale(1.18, .84); }
-  68% { transform: scale(.93, 1.07); }
-  73% { transform: scale(1.03, .97); }
-  78%, 100% { transform: scale(1, 1); }
-}
-@keyframes tg-wig {                  /* the yank: a swing one way, then back, settling like a spring */
-  0%, 33% { transform: rotate(0deg); }
-  39% { transform: rotate(17deg); }
-  45% { transform: rotate(-12deg); }
-  50% { transform: rotate(7deg); }
-  55% { transform: rotate(-3deg); }
-  60%, 100% { transform: rotate(0deg); }
-}
-
-/* ---- terminal (running a command) ---- */
-.cm-win { transform-origin: 50% 82%; animation: cm-win 2.4s cubic-bezier(.2, .8, .3, 1) infinite; }
-.cm-key, .cm-caret { animation-duration: 2.4s; animation-iteration-count: infinite; }
-.cm-k1 { transform-origin: 44.5% 57%; animation-name: cm-k1; }
-.cm-k2 { transform-origin: 55.5% 57%; animation-name: cm-k2; }
-.cm-k3 { transform-origin: 66.5% 57%; animation-name: cm-k3; }
-.cm-caret { animation-name: cm-caret; }
-@keyframes cm-k1 {
-  0%, 13% { opacity: 0; transform: translateY(0) scale(0, 0); }
-  14% { opacity: 1; transform: translateY(0) scale(.2, .2); animation-timing-function: cubic-bezier(.2, .9, .3, 1); }
-  17% { transform: translateY(0) scale(1.45, .7); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  20% { transform: translateY(0) scale(.85, 1.2); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  23% { transform: translateY(0) scale(1.06, .94); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  26% { transform: translateY(0) scale(1, 1); }
-  60% { opacity: 1; transform: translateY(0) scale(1, 1); animation-timing-function: cubic-bezier(.5, 0, .75, .3); }
-  68%, 100% { opacity: 0; transform: translateY(-.14em) scale(.85, 1.1); }
-}
-@keyframes cm-k2 {
-  0%, 29% { opacity: 0; transform: translateY(0) scale(0, 0); }
-  30% { opacity: 1; transform: translateY(0) scale(.2, .2); animation-timing-function: cubic-bezier(.2, .9, .3, 1); }
-  33% { transform: translateY(0) scale(1.45, .7); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  36% { transform: translateY(0) scale(.85, 1.2); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  39% { transform: translateY(0) scale(1.06, .94); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  42% { transform: translateY(0) scale(1, 1); }
-  60% { opacity: 1; transform: translateY(0) scale(1, 1); animation-timing-function: cubic-bezier(.5, 0, .75, .3); }
-  68%, 100% { opacity: 0; transform: translateY(-.14em) scale(.85, 1.1); }
-}
-@keyframes cm-k3 {
-  0%, 45% { opacity: 0; transform: translateY(0) scale(0, 0); }
-  46% { opacity: 1; transform: translateY(0) scale(.2, .2); animation-timing-function: cubic-bezier(.2, .9, .3, 1); }
-  49% { transform: translateY(0) scale(1.45, .7); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  52% { transform: translateY(0) scale(.85, 1.2); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  55% { transform: translateY(0) scale(1.06, .94); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  58% { transform: translateY(0) scale(1, 1); }
-  60% { opacity: 1; transform: translateY(0) scale(1, 1); animation-timing-function: cubic-bezier(.5, 0, .75, .3); }
-  68%, 100% { opacity: 0; transform: translateY(-.14em) scale(.85, 1.1); }
-}
-@keyframes cm-caret {
-  0%   { opacity: 1; transform: translate(0, 0); }
-  5%   { opacity: .15; }
-  10%  { opacity: 1; transform: translate(0, 0); animation-timing-function: cubic-bezier(.2, .9, .3, 1.35); }
-  15%  { transform: translate(.108em, 0); }
-  26%  { transform: translate(.108em, 0); animation-timing-function: cubic-bezier(.2, .9, .3, 1.35); }
-  31%  { transform: translate(.218em, 0); }
-  42%  { transform: translate(.218em, 0); animation-timing-function: cubic-bezier(.2, .9, .3, 1.35); }
-  47%  { opacity: 1; transform: translate(.328em, 0); }
-  52%  { opacity: .15; }
-  57%  { opacity: 1; transform: translate(.328em, 0); animation-timing-function: cubic-bezier(.5, 0, .75, .3); }
-  64%  { opacity: 0; transform: translate(.328em, -.14em); }
-  80%  { opacity: 0; transform: translate(0, 0); }
-  86%  { opacity: 1; }
-  93%  { opacity: .15; }
-  100% { opacity: 1; transform: translate(0, 0); }
-}
-@keyframes cm-win {                  /* Enter: the window wobbles like jelly */
-  0%, 57% { transform: scale(1, 1); }
-  60% { transform: scale(1.07, .9); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  64% { transform: scale(.95, 1.06); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  68% { transform: scale(1.02, .98); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  72%, 100% { transform: scale(1, 1); }
-}
-
-/* ---- checklist (planning): row k runs k × .55 s behind the first ---- */
-.pl-box, .pl-check, .pl-bar { animation-duration: 3.6s; animation-iteration-count: infinite; animation-fill-mode: backwards; animation-delay: calc(var(--k) * .55s); }
-.pl-box { animation-name: pl-box; }
-.pl-check { animation-name: pl-check; }
-.pl-bar { opacity: .55; animation-name: pl-bar; }
-@keyframes pl-check {
-  0%, 6% { opacity: 0; transform: scale(0) rotate(-35deg); }
-  7% { opacity: 1; transform: scale(.3) rotate(-35deg); animation-timing-function: cubic-bezier(.2, .9, .3, 1); }
-  11% { transform: scale(1.4) rotate(8deg); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  15% { transform: scale(.86) rotate(-4deg); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  19% { transform: scale(1.07) rotate(2deg); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  23% { transform: scale(1) rotate(0deg); }
-  64% { opacity: 1; transform: scale(1) rotate(0deg); animation-timing-function: cubic-bezier(.5, 0, .75, .3); }
-  72% { opacity: 0; transform: scale(.3) rotate(0deg); }
-  100% { opacity: 0; transform: scale(0) rotate(-35deg); }
-}
-@keyframes pl-box {
-  0%, 7% { transform: scale(1, 1); }
-  10% { transform: scale(1.3, .76); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  14% { transform: scale(.86, 1.16); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  18% { transform: scale(1.05, .96); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  23%, 100% { transform: scale(1, 1); }
-}
-@keyframes pl-bar {
-  0%, 9% { opacity: .55; transform: translateX(0); }
-  13% { opacity: .95; transform: translateX(.03em); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  22% { opacity: .28; transform: translateX(0); }
-  64% { opacity: .28; transform: translateX(0); }
-  74%, 100% { opacity: .55; transform: translateX(0); }
-}
-
-/* ---- robot (a helper at work) ---- */
-.rb-hop { animation: rb-hop 1.5s infinite; }
-.rb-squash { transform-origin: 50% 78%; animation: rb-squash 1.5s infinite; }
-.rb-ant { transform-origin: 50% 38%; animation: rb-ant 1.5s cubic-bezier(.45, 0, .55, 1) infinite; }
-.rb-led { animation: rb-led .75s cubic-bezier(.45, 0, .55, 1) infinite alternate; }
-.rb-eyes { transform-origin: 50% 56.5%; animation: rb-blink 3.1s infinite; }
-.rb-shadow { transform-origin: 50% 92%; animation: rb-shadow 1.5s cubic-bezier(.45, 0, .55, 1) infinite; }
-@keyframes rb-hop {
-  0%, 12% { transform: translateY(0); animation-timing-function: cubic-bezier(.2, .6, .35, 1); }
-  40% { transform: translateY(-.17em); animation-timing-function: cubic-bezier(.55, 0, .85, .4); }
-  62% { transform: translateY(0); animation-timing-function: cubic-bezier(.3, .7, .4, 1); }
-  70% { transform: translateY(-.018em); animation-timing-function: cubic-bezier(.5, 0, .7, .4); }
-  78%, 100% { transform: translateY(0); }
-}
-@keyframes rb-squash {
-  0%   { transform: scale(1, 1); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  12%  { transform: scale(1.14, .84); animation-timing-function: cubic-bezier(.2, .7, .3, 1); }
-  22%  { transform: scale(.88, 1.15); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  40%  { transform: scale(1, 1); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  56%  { transform: scale(.93, 1.08); animation-timing-function: cubic-bezier(.55, 0, .85, .4); }
-  62%  { transform: scale(1.18, .8); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  70%  { transform: scale(.94, 1.07); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  79%  { transform: scale(1.04, .97); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  89%  { transform: scale(.99, 1.01); }
-  100% { transform: scale(1, 1); }
-}
-@keyframes rb-ant { 0% { transform: rotate(0deg); } 12% { transform: rotate(5deg); } 24% { transform: rotate(-14deg); } 40% { transform: rotate(10deg); } 54% { transform: rotate(-5deg); } 64% { transform: rotate(18deg); } 72% { transform: rotate(-12deg); } 80% { transform: rotate(7deg); } 89% { transform: rotate(-3deg); } 100% { transform: rotate(0deg); } }
-@keyframes rb-led { from { opacity: .45; } to { opacity: 1; } }
-@keyframes rb-blink { 0%, 84%, 90%, 96%, 100% { transform: scaleY(1); } 87%, 93% { transform: scaleY(.1); } }
-@keyframes rb-shadow { 0%, 12% { transform: scale(1.08, 1); opacity: 1; } 40% { transform: scale(.6, .8); opacity: .45; } 62% { transform: scale(1.18, 1); opacity: 1; } 78%, 100% { transform: scale(1, 1); opacity: 1; } }
-
-/* ---- page (reading): line k lights up when the highlight is on it (k fifths of the loop) ---- */
-.rd-page { transform-origin: 25% 50%; animation: rd-page 2.8s cubic-bezier(.45, 0, .55, 1) infinite; }
-.rd-hi { transform-origin: 51.5% 44%; animation: rd-hi 2.8s cubic-bezier(.45, 0, .55, 1) infinite; }
-.rd-line { opacity: .4; animation: rd-line 2.8s infinite backwards; animation-delay: calc(var(--k) * .56s); }
-@keyframes rd-page {
-  0%, 100% { transform: rotate(0deg) scale(1, 1); }
-  22% { transform: rotate(-2.5deg) scale(1, 1); }
-  52% { transform: rotate(2deg) scale(1, 1); }
-  78% { transform: rotate(0deg) scale(1, 1); }
-  84% { transform: rotate(0deg) scale(.8, 1.02); animation-timing-function: cubic-bezier(.3, .7, .4, 1); }
-  90% { transform: rotate(0deg) scale(1.06, .99); }
-  95% { transform: rotate(0deg) scale(.98, 1); }
-}
-@keyframes rd-hi {
-  0%  { opacity: 0; transform: translateY(0) scale(.5, 1); animation-timing-function: cubic-bezier(.2, .8, .3, 1.3); }
-  5%  { opacity: 1; transform: translateY(0) scale(1.08, .86); }
-  9%  { transform: translateY(0) scale(.97, 1.06); }
-  13% { transform: translateY(0) scale(1, 1); }
-  20% { transform: translateY(0) scale(1, 1); animation-timing-function: cubic-bezier(.5, 0, .6, 1); }
-  24% { transform: translateY(.13em) scale(.9, 1.22); }
-  28% { transform: translateY(.105em) scale(1.06, .9); }
-  32% { transform: translateY(.11em) scale(1, 1); }
-  40% { transform: translateY(.11em) scale(1, 1); animation-timing-function: cubic-bezier(.5, 0, .6, 1); }
-  44% { transform: translateY(.24em) scale(.9, 1.22); }
-  48% { transform: translateY(.215em) scale(1.06, .9); }
-  52% { transform: translateY(.22em) scale(1, 1); }
-  60% { transform: translateY(.22em) scale(1, 1); animation-timing-function: cubic-bezier(.5, 0, .6, 1); }
-  64% { transform: translateY(.35em) scale(.9, 1.22); }
-  68% { transform: translateY(.325em) scale(1.06, .9); }
-  72% { transform: translateY(.33em) scale(1, 1); }
-  80% { opacity: 1; transform: translateY(.33em) scale(1, 1); }
-  86% { opacity: 0; transform: translateY(.33em) scale(.5, 1); }
-  100% { opacity: 0; transform: translateY(0) scale(.5, 1); }
-}
-@keyframes rd-line { 0% { opacity: .4; } 4%, 20% { opacity: 1; } 28%, 100% { opacity: .4; } }
-
-/* ---- magnifier (searching): a figure of eight (x twice as slow as y), a zoom at each end ---- */
-.sr-x { animation: sr-x 1.3s cubic-bezier(.37, 0, .63, 1) infinite alternate; }
-.sr-y { animation: sr-y .65s cubic-bezier(.37, 0, .63, 1) infinite alternate; animation-delay: -.325s; }
-.sr-zoom { transform-origin: 50% 46.5%; animation: sr-zoom 1.3s infinite; }
-.sr-dot { opacity: .35; animation: sr-dot 2.6s infinite; }
-.sr-d1 { transform-origin: 23% 46.5%; }
-.sr-d2 { transform-origin: 77% 46.5%; animation-delay: -1.3s; }
-@keyframes sr-x { from { transform: translateX(-.27em); } to { transform: translateX(.27em); } }
-@keyframes sr-y { from { transform: translateY(-.09em); } to { transform: translateY(.09em); } }
-@keyframes sr-zoom {
-  0%  { transform: scale(1.22); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  8%  { transform: scale(.9); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  16% { transform: scale(1.06); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  24% { transform: scale(.98); }
-  32% { transform: scale(1); }
-  86% { transform: scale(1); animation-timing-function: cubic-bezier(.5, 0, .8, .4); }
-  100% { transform: scale(1.22); }
-}
-@keyframes sr-dot {
-  0%  { opacity: 1; transform: scale(2); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  6%  { opacity: .9; transform: scale(.8); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  12% { transform: scale(1.15); }
-  20% { opacity: .5; transform: scale(1); }
-  92% { opacity: .35; transform: scale(1); animation-timing-function: cubic-bezier(.5, 0, .8, .4); }
-  100% { opacity: 1; transform: scale(2); }
-}
-
-/* ---- plug (connecting tools); the cord keeps the plug's times and curves, its length (4.6 + the plug's move) as a scale ---- */
-.cn-plug { transform-origin: 36% 50%; animation: cn-plug 2.2s infinite; }
-.cn-cord { transform-origin: 2% 58%; animation: cn-cord 2.2s infinite; }
-.cn-sock { transform-origin: 87% 50%; animation: cn-sock 2.2s infinite; }
-.cn-glow { animation: cn-glow 2.2s infinite; }
-.cn-spark { transform-origin: 72% 50%; animation: cn-spark 2.2s infinite; }
-@keyframes cn-plug {
-  0%   { transform: translateX(-.06em) scale(1, 1); animation-timing-function: cubic-bezier(.55, 0, .85, .3); }
-  20%  { transform: translateX(.135em) scale(.88, 1.1); animation-timing-function: cubic-bezier(.3, .7, .4, 1); }
-  27%  { transform: translateX(.08em) scale(1.06, .95); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  33%  { transform: translateX(.1075em) scale(.98, 1.02); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  40%  { transform: translateX(.1em) scale(1, 1); }
-  70%  { transform: translateX(.1em) scale(1, 1); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  78%  { transform: translateX(.07em) scale(1.04, .97); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  100% { transform: translateX(-.06em) scale(1, 1); }
-}
-@keyframes cn-cord {
-  0%   { transform: scaleX(.739); animation-timing-function: cubic-bezier(.55, 0, .85, .3); }
-  20%  { transform: scaleX(1.587); animation-timing-function: cubic-bezier(.3, .7, .4, 1); }
-  27%  { transform: scaleX(1.348); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  33%  { transform: scaleX(1.467); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  40%  { transform: scaleX(1.435); }
-  70%  { transform: scaleX(1.435); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  78%  { transform: scaleX(1.304); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  100% { transform: scaleX(.739); }
-}
-@keyframes cn-sock {
-  0%, 18% { transform: scale(1, 1); }
-  21% { transform: scale(.9, 1.06); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  26% { transform: scale(1.05, .97); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
-  31% { transform: scale(.98, 1.01); }
-  36%, 100% { transform: scale(1, 1); }
-}
-@keyframes cn-glow { 0%, 20% { opacity: 0; } 24% { opacity: .9; } 32%, 68% { opacity: .5; } 76%, 100% { opacity: 0; } }
-@keyframes cn-spark {
-  0%, 18% { opacity: 0; transform: scale(.4); }
-  21% { opacity: 1; transform: scale(1.15); animation-timing-function: cubic-bezier(.2, .7, .3, 1); }
-  31%, 100% { opacity: 0; transform: scale(1.5); }
+@media (prefers-reduced-motion: reduce) {
+  .bloom *, .mk-slot > span { animation: none !important; }
+  .bl-orbit, .bl-pollen, .mk-slot > .mk-out { display: none; }
 }
 
 /* ---- the working words: a light sweeps over them (a bright copy seen through a sliding window, GPU only) ---- */
@@ -897,6 +614,6 @@ body.dragging webview, body.dragging iframe { pointer-events: none !important; }
 @keyframes shim-copy { 0% { transform: translateX(100%); } 78%, 100% { transform: translateX(-100%); } }
 
 @media (prefers-reduced-motion: reduce) {
-  .mk, .mk .p, .mk-slot > span, .shim-copy { animation: none !important; }
+  .shim-copy { animation: none !important; }
   .shim-band { display: none; }
 }

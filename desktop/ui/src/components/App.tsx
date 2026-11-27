@@ -272,6 +272,8 @@ function useTheme() {
       root.classList.toggle("dark", dark);
       root.classList.toggle("light", !dark);
       root.classList.toggle("eveny", eveny);
+      const warm = theme === "warm";                                        // light, in cream
+      root.classList.toggle("warm", warm);
       applyCodeStyle(dark, dark ? codeDark : codeLight, codeFont, codePx);
       root.classList.toggle("accent-lavender", accent === "lavender");     // Emilie pink is the base accent
       for (const c of ["chat-sans", "chat-system", "chat-dyslexic"]) root.classList.remove(c);
@@ -279,7 +281,7 @@ function useTheme() {
       try {
         localStorage.setItem("emilie-theme", theme);
       } catch { /* private mode */ }
-      bridge?.setTitleBar({ color: eveny ? "#0a0f1c" : dark ? "#191919" : "#faf9f5", symbolColor: dark ? "#c2c0b6" : "#3d3d3a" });
+      bridge?.setTitleBar({ color: eveny ? "#0a0f1c" : dark ? "#191919" : warm ? "#faf9f5" : "#ffffff", symbolColor: dark ? "#c2c0b6" : "#3d3d3a" });
     };
     apply();
     mq.addEventListener("change", apply);
@@ -308,6 +310,11 @@ function useShortcuts() {
       else if (mod && k === "b") { e.preventDefault(); s.setSetting("desktop_sidebar", s.settings.desktop_sidebar === false); }
       else if (mod && k === "j") { e.preventDefault(); s.setPane("terminal"); }
       else if (mod && e.shiftKey && k === "e") { e.preventDefault(); s.setPane("files"); }
+      else if (mod && e.shiftKey && k === "f") { e.preventDefault(); s.setPane("search"); }
+      else if (mod && e.shiftKey && k === "g") { e.preventDefault(); s.setPane("git"); }
+      else if (mod && e.shiftKey && k === "m") { e.preventDefault(); s.setPane("problems"); }
+      else if (mod && e.shiftKey && k === "u") { e.preventDefault(); s.setPane("tests"); }
+      else if (mod && e.shiftKey && k === "y") { e.preventDefault(); s.setPane("scripts"); }
       // the model picker with its effort levels, as Ctrl+Shift+I in Claude (the developer tools moved to F12)
       else if (mod && e.shiftKey && k === "i" && !e.repeat) { e.preventDefault(); openPicker("model-toggle"); }
       else if (e.altKey && e.key === "ArrowLeft") { e.preventDefault(); s.goBack(); }
